@@ -12,6 +12,7 @@ muse 的冒烟不连接浏览器：只验证服务本身能起来、路由能响
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -24,6 +25,19 @@ PORT = int(os.environ.get("MUSE_BRIDGE_PORT", "18788"))
 BASE = f"http://127.0.0.1:{PORT}"
 TIMEOUT_SECONDS = 40.0
 INTERVAL = 0.5
+
+
+def ensure_utf8_stdout() -> None:
+    """把 stdout/stderr 切到 UTF-8。
+
+    GitHub Actions 的 windows-latest 上，Python 的 stdout 是 cp1252。
+    本项目的作者署名是中文，任何 print 都会抛 UnicodeEncodeError 让构建挂掉。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(encoding="utf-8", errors="replace")
 
 
 def _get(path: str) -> dict:
@@ -47,6 +61,8 @@ def wait_until_ready() -> bool:
 
 
 def main() -> int:
+    ensure_utf8_stdout()
+
     import uvicorn
 
     from .app import app

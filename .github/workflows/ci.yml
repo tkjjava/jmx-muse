@@ -42,8 +42,12 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m pytest tests -v
 
+      # 用 ascii 转义输出：Windows runner 的 stdout 是 cp1252，
+      # 直接 print 中文会 UnicodeEncodeError
       - name: Verify package imports
-        run: python -c "import muse_bridge; print(muse_bridge.__author__, muse_bridge.__mark__)"
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -c "import muse_bridge; print(muse_bridge.__author__.encode('unicode_escape').decode(), muse_bridge.__mark__.encode('unicode_escape').decode())"
 
       - name: Verify selector tables
         run: |
@@ -53,7 +57,7 @@ jobs:
       - name: Smoke test server startup
         env:
           PYTHONIOENCODING: utf-8
-          MUSE_BRIDGE_KEY: "Yk1vR3g5dExhM3BXNnFSc1Q5dUMyeVphNGJDNWRFRmdoSTBrTG1Ob1BxUT0="
+          MUSE_BRIDGE_KEY: "C1IQcjvmR1TGXTXrsT1z12eWb4Z6jLqXtqmZ-QBZ5Gs="
           MUSE_BRIDGE_DB: "./ci-smoke.db"
           MUSE_BRIDGE_PORT: "18788"
         run: python -m muse_bridge.smoke
