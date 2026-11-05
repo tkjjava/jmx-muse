@@ -182,7 +182,7 @@ curl http://127.0.0.1:8788/v1/chat/completions \
 
 ## 许可
 
-MIT © 2026 **君莫笑**
+MIT © 2026 **tkjjava (君莫笑)**
 
 **永恒之兰**
 

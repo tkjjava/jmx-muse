@@ -254,7 +254,7 @@ Full guide: [docs/USAGE.md](docs/USAGE.md) (Chinese) · Protocol details: [docs/
 
 ## License
 
-MIT © 2026 **Junmoxiao (君莫笑)** · **Eternal Orchid (永恒之兰)**
+MIT © 2026 **tkjjava (君莫笑)** · **Eternal Orchid (永恒之兰)**
 
 ## Disclaimer
 
