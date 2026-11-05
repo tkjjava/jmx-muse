@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "muse-bridge"
+version = "0.1.0"
+description = "把 muse.ai 暴露成 OpenAI 兼容接口（CDP 驱动，不含注册环节）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "君莫笑" }]
+keywords = ["openai", "api-bridge", "muse", "llm", "永恒之兰"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "httpx>=0.27",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "cryptography>=42",
+    "pydantic>=2.6",
+    "playwright>=1.44",
+]
+
+[project.urls]
+Homepage = "https://github.com/junmoxiao/muse-bridge"
+
+[project.scripts]
+muse-bridge = "muse_bridge.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["muse_bridge*"]

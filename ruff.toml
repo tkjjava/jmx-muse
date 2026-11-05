@@ -1,0 +1,11 @@
+line-length = 88
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# UP042: 保持 str+Enum 组合，改 StrEnum 会改变 json 序列化行为
+# SIM103: 早返回链比内联复合条件更易读，且能容纳未来追加的检查
+ignore = ["E501", "UP042", "SIM103"]
+
+[lint.isort]
+known-first-party = ["muse_bridge"]
