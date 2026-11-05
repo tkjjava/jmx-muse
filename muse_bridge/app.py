@@ -115,6 +115,8 @@ async def chat_completions(request: ChatRequest, _: None = Depends(require_key))
 
     try:
         result = await pool.dispatch(store())
+    except pool.AllAccountsBusy as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except pool.NoAccountAvailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -133,9 +135,11 @@ async def chat_completions(request: ChatRequest, _: None = Depends(require_key))
     model = request.model or pool.DEFAULT_MODEL
 
     async def finish() -> None:
-        """收尾：关闭驱动连接（不关用户的 Chrome）。"""
-        if result.driver is not None:
-            await result.driver.close()
+        """收尾：释放账号锁并断开 CDP（不关用户的 Chrome）。
+
+        锁必须覆盖整个请求（含流式输出），所以释放发生在这里。
+        """
+        await result.release()
 
     if not request.stream:
         try:
@@ -336,6 +340,7 @@ async def healthz() -> dict:
         "mark": __mark__,
         "accounts_total": len(accounts),
         "accounts_dispatchable": len(dispatchable),
+        "accounts_busy": len(pool.busy_accounts()),
         "cdp_url": CDP_URL,
     }
 

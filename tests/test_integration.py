@@ -11,6 +11,16 @@ from muse_bridge.state import AccountState
 from muse_bridge.store import AccountStore
 
 
+@pytest.fixture(autouse=True)
+def clear_dispatch_state():
+    """账号锁与轮转游标是模块级的，测试之间必须清干净。"""
+    pool._locks.clear()
+    pool._cursor["index"] = 0
+    yield
+    pool._locks.clear()
+    pool._cursor["index"] = 0
+
+
 @pytest.fixture
 def bridge_key(monkeypatch):
     from cryptography.fernet import Fernet
@@ -219,7 +229,10 @@ async def test_stream_reply_concatenates(store, monkeypatch):
 
     monkeypatch.setattr(pool, "MuseDriver", FakeDriver)
     result = await pool.dispatch(store)
-    text = await pool.collect_reply(result, "测试")
+    try:
+        text = await pool.collect_reply(result, "测试")
+    finally:
+        await result.release()
     assert text == "你好，世界"
 
 
