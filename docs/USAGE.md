@@ -101,6 +101,40 @@ curl http://127.0.0.1:9222/json/version
 
 ## 四、启动 muse-bridge
 
+先跑自检，确认五件事都齐备：
+
+```bash
+python -m muse_bridge.doctor
+```
+
+输出示例：
+
+```
+muse-bridge 0.1.0  ·  君莫笑  ·  永恒之兰
+CDP：http://127.0.0.1:9222
+站点：https://muse.ai
+
+  ✓ 加密密钥 — 加解密往返正常
+  ✓ 数据库读写 — 写入、加密、读回均正常
+  ✓ playwright 依赖 — 已安装 v1.44.0
+  ✗ Chrome 调试端口 — 连不上 http://127.0.0.1:9222（ConnectError）
+      提示：用 --remote-debugging-port=9222 和独立 --user-data-dir 启动 Chrome
+```
+
+五项检查对应五个前置条件，缺哪项修哪项：
+
+| 检查项 | 缺了会怎样 |
+|---|---|
+| 加密密钥 | 服务起不来 |
+| 数据库读写 | 账号存不进去 |
+| playwright 依赖 | 连不上浏览器 |
+| Chrome 调试端口 | 连不上浏览器 |
+| muse.ai 登录态 | 派单全部失败 |
+
+**前四项都通过才会检查第五项**——否则报错会层层叠加，看不出真正的原因。
+
+自检通过后启动服务：
+
 ```bash
 python -m muse_bridge
 ```

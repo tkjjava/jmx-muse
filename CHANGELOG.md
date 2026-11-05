@@ -6,6 +6,11 @@
 
 ### 新增
 
+- **自检工具** `python -m muse_bridge.doctor`
+  - 加密密钥、数据库（实测加密落盘）
+  - playwright 依赖检测
+  - Chrome CDP 端口连通性
+  - muse.ai 登录态（前四项都通过才检查）
 - **OpenAI 兼容接口**
   - `POST /v1/chat/completions`（非流式 + SSE 流式）
   - `GET /v1/models`（别名全部映射到 `muse-spark-1.3`）
@@ -31,7 +36,7 @@
 
 ### 测试
 
-27 项，不启动真实浏览器。覆盖：
+35 项，不启动真实浏览器。覆盖：
 
 - 选择器表完整性
 - 状态机（终态不派单、探针过期、VM 休眠可派单）

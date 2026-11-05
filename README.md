@@ -95,6 +95,10 @@ google-chrome --remote-debugging-port=9222 --user-data-dir="$HOME/muse-profile"
 ### 3. 启动 muse-bridge
 
 ```bash
+# 先自检：五项前置条件逐个验证
+python -m muse_bridge.doctor
+
+# 再启动
 python -m muse_bridge
 ```
 
