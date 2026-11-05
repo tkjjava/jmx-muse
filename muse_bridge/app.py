@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -138,8 +139,11 @@ async def chat_completions(request: ChatRequest, _: None = Depends(require_key))
         """收尾：释放账号锁并断开 CDP（不关用户的 Chrome）。
 
         锁必须覆盖整个请求（含流式输出），所以释放发生在这里。
+
+        用 shield 保护：客户端中途断开时当前任务处于 cancelled 状态，
+        直接 await 会被立即取消，锁就漏了——那个账号从此永久不可用。
         """
-        await result.release()
+        await asyncio.shield(result.release())
 
     if not request.stream:
         try:
@@ -212,8 +216,11 @@ async def chat_completions(request: ChatRequest, _: None = Depends(require_key))
                     }
                 )
         except TimeoutError:
+            # 超时不算致命：把已产出的部分交给客户端，正常收尾
             pass
         finally:
+            # 包含 CancelledError（客户端断开）的情况——
+            # finish 内部用 shield 保护，确保锁一定释放
             await finish()
 
         yield chunk(

@@ -176,11 +176,25 @@ async def stream_reply(
 
     不负责关闭驱动或释放锁——那是调用方 release() 的事，
     这样锁能覆盖整个流式输出期间。
+
+    这里再套一层超时保护：driver 自己也有 deadline，但那是它的事。
+    如果 driver 实现有 bug 或前端一直显示"生成中"，没有这层就会无限产出，
+    把连接和锁永远占住。
     """
     if not result.ok or result.driver is None:
         return
-    async for delta in result.driver.stream_reply(prompt, timeout=timeout):
-        yield delta
+
+    deadline = time.monotonic() + timeout
+    generator = result.driver.stream_reply(prompt, timeout=timeout)
+
+    try:
+        async for delta in generator:
+            yield delta
+            if time.monotonic() >= deadline:
+                return
+    finally:
+        # 生成器被提前丢弃时要显式关闭，否则内部的循环不会退出
+        await generator.aclose()
 
 
 async def collect_reply(
