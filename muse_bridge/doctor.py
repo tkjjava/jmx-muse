@@ -135,8 +135,7 @@ async def check_cdp(cdp_url: str) -> CheckResult:
     except httpx.HTTPError as exc:
         result.detail = f"连不上 {cdp_url}（{type(exc).__name__}）"
         result.hint = (
-            "用 --remote-debugging-port=9222 和独立 --user-data-dir "
-            "启动 Chrome"
+            "用 --remote-debugging-port=9222 和独立 --user-data-dir 启动 Chrome"
         )
         return result
 

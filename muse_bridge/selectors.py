@@ -12,7 +12,7 @@ from __future__ import annotations
 # 登录态判定的候选。命中任一即认为已登录。
 LOGGED_IN_MARKERS = (
     '[data-testid="composer"]',
-    'textarea[placeholder]',
+    "textarea[placeholder]",
     '[contenteditable="true"]',
     'button[aria-label*="Send"]',
     'button[aria-label*="发送"]',
@@ -28,10 +28,10 @@ LOGGED_OUT_MARKERS = (
 
 # 输入框候选，按优先级排列
 COMPOSER_INPUTS = (
-    'textarea[placeholder]',
+    "textarea[placeholder]",
     '[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"]',
-    'textarea',
+    "textarea",
 )
 
 # 发送按钮候选

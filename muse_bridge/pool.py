@@ -162,8 +162,7 @@ async def dispatch(store: AccountStore) -> DispatchResult:
 
     if busy and not last_error:
         raise AllAccountsBusy(
-            f"所有可用账号都在处理请求中（{len(busy)} 个）。"
-            "muse 只能串行，请稍后重试。"
+            f"所有可用账号都在处理请求中（{len(busy)} 个）。muse 只能串行，请稍后重试。"
         )
 
     return DispatchResult(ok=False, verdict="all_accounts_failed", note=last_error)

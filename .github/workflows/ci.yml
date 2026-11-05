@@ -36,7 +36,7 @@ jobs:
       - name: Check formatting
         run: ruff format --check muse_bridge tests
 
-      # 测试不打真实浏览器：不安装 playwright 浏览器内核，也不连 CDP
+      # 测试不启动真实浏览器，也不需要 playwright 内核
       - name: Run tests
         env:
           PYTHONIOENCODING: utf-8
@@ -47,21 +47,13 @@ jobs:
 
       - name: Verify selector tables
         run: |
-          python -c "
-          from muse_bridge import selectors
-          for name in ('LOGGED_IN_MARKERS', 'COMPOSER_INPUTS', 'SEND_BUTTONS', 'ASSISTANT_MESSAGES', 'STREAMING_MARKERS'):
-              table = getattr(selectors, name)
-              assert table, name
-          print('selectors ok')
-          "
+          python -c "from muse_bridge import selectors; names=('LOGGED_IN_MARKERS','COMPOSER_INPUTS','SEND_BUTTONS','ASSISTANT_MESSAGES','STREAMING_MARKERS'); [print(f'{n}: {len(getattr(selectors, n))}') for n in names]; assert all(getattr(selectors, n) for n in names); print('selectors ok')"
 
-      - name: Verify server starts
+      # 用 Python 脚本做启动冒烟：跨平台，不需要浏览器
+      - name: Smoke test server startup
         env:
+          PYTHONIOENCODING: utf-8
           MUSE_BRIDGE_KEY: "Yk1vR3g5dExhM3BXNnFSc1Q5dUMyeVphNGJDNWRFRmdoSTBrTG1Ob1BxUT0="
-          MUSE_BRIDGE_DB: "./ci-test.db"
-        run: |
-          python -m muse_bridge &
-          sleep 8
-          curl -fsS http://127.0.0.1:8788/healthz
-          kill %1
-        shell: bash
+          MUSE_BRIDGE_DB: "./ci-smoke.db"
+          MUSE_BRIDGE_PORT: "18788"
+        run: python -m muse_bridge.smoke

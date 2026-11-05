@@ -139,9 +139,7 @@ class AccountStore:
         )
         self._conn.commit()
 
-    def mark_ready(
-        self, account: str, *, vm_ready: bool, state: AccountState
-    ) -> None:
+    def mark_ready(self, account: str, *, vm_ready: bool, state: AccountState) -> None:
         now = int(time.time())
         self._conn.execute(
             """
@@ -152,9 +150,7 @@ class AccountStore:
         )
         self._conn.commit()
 
-    def mark_failure(
-        self, account: str, *, state: AccountState, error: str
-    ) -> None:
+    def mark_failure(self, account: str, *, state: AccountState, error: str) -> None:
         now = int(time.time())
         self._conn.execute(
             """
@@ -187,9 +183,7 @@ class AccountStore:
         return self._decrypt(row["profile_enc"]) if row else {}
 
     def list_all(self) -> list[Account]:
-        rows = self._conn.execute(
-            "SELECT * FROM accounts ORDER BY account"
-        ).fetchall()
+        rows = self._conn.execute("SELECT * FROM accounts ORDER BY account").fetchall()
         return [_row_to_account(row) for row in rows]
 
     def dispatchable(self) -> list[Account]:
@@ -222,9 +216,7 @@ class AccountStore:
         ]
 
     def delete(self, account: str) -> bool:
-        cursor = self._conn.execute(
-            "DELETE FROM accounts WHERE account=?", (account,)
-        )
+        cursor = self._conn.execute("DELETE FROM accounts WHERE account=?", (account,))
         self._conn.commit()
         return cursor.rowcount > 0
 

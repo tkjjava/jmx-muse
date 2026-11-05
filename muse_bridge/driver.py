@@ -94,9 +94,7 @@ class MuseDriver:
         self._page = await self._pick_muse_page(context)
         if self._page is None:
             await self.close()
-            raise BrowserUnavailable(
-                f"Chrome 里没有 {SITE} 的标签页。请先打开并登录。"
-            )
+            raise BrowserUnavailable(f"Chrome 里没有 {SITE} 的标签页。请先打开并登录。")
 
     async def _pick_muse_page(self, context):
         """优先复用已有 muse.ai 标签页，避免反复开新页。"""
@@ -250,7 +248,7 @@ class MuseDriver:
 
             started = True
             if current.startswith(last):
-                delta = current[len(last):]
+                delta = current[len(last) :]
             elif current != last:
                 # 不单调：页面重绘或消息被替换，整体重发
                 delta = current
@@ -272,9 +270,7 @@ class MuseDriver:
         if not started:
             raise TimeoutError(f"{timeout} 秒内没有产生新回答")
 
-    async def collect_reply(
-        self, prompt: str, *, timeout: float = 180.0
-    ) -> str:
+    async def collect_reply(self, prompt: str, *, timeout: float = 180.0) -> str:
         """一次性收全文。"""
         parts: list[str] = []
         async for delta in self.stream_reply(prompt, timeout=timeout):

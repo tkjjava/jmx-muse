@@ -47,9 +47,7 @@ def test_selector_tables_are_non_empty():
 
 def test_dispatchable_ready():
     now = int(time.time())
-    assert is_dispatchable(
-        AccountState.READY, now=now, last_probe_ok_at=now - 60
-    )
+    assert is_dispatchable(AccountState.READY, now=now, last_probe_ok_at=now - 60)
 
 
 def test_dispatchable_requires_fresh_probe():
@@ -57,9 +55,7 @@ def test_dispatchable_requires_fresh_probe():
     assert not is_dispatchable(
         AccountState.READY, now=now, last_probe_ok_at=now - (16 * 60)
     )
-    assert not is_dispatchable(
-        AccountState.READY, now=now, last_probe_ok_at=None
-    )
+    assert not is_dispatchable(AccountState.READY, now=now, last_probe_ok_at=None)
 
 
 @pytest.mark.parametrize(
@@ -79,9 +75,7 @@ def test_terminal_states_not_dispatchable(state):
 def test_vm_sleeping_still_dispatchable():
     """VM 休眠可以派单——派单前会先 wake。"""
     now = int(time.time())
-    assert is_dispatchable(
-        AccountState.VM_SLEEPING, now=now, last_probe_ok_at=now - 30
-    )
+    assert is_dispatchable(AccountState.VM_SLEEPING, now=now, last_probe_ok_at=now - 30)
 
 
 def test_after_probe_maps_states():

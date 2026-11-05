@@ -96,9 +96,7 @@ class TestCheckCdp:
         import muse_bridge.doctor as mod
 
         def handler(request):
-            return httpx_module.Response(
-                200, json={"Browser": "Chrome/131.0.0.0"}
-            )
+            return httpx_module.Response(200, json={"Browser": "Chrome/131.0.0.0"})
 
         transport = httpx_module.MockTransport(handler)
 

@@ -23,9 +23,9 @@ HEARTBEAT_INTERVAL_SECONDS = 30 * 60
 
 class AccountState(str, Enum):
     UNVERIFIED = "unverified"
-    READY = "ready"                      # 已连接且已登录
-    VM_SLEEPING = "vm_sleeping"          # VM 休眠，需要 wake
-    VML_EXPIRING = "vml_expiring"        # hatch_vml 快过期
+    READY = "ready"  # 已连接且已登录
+    VM_SLEEPING = "vm_sleeping"  # VM 休眠，需要 wake
+    VML_EXPIRING = "vml_expiring"  # hatch_vml 快过期
     SESSION_EXPIRED = "session_expired"
     NEEDS_INTERACTIVE_VERIFICATION = "needs_interactive_verification"
     BLOCKED = "blocked"

@@ -71,9 +71,7 @@ def _prompt_of(messages: list[ChatMessage]) -> str:
         content = message.content
         if isinstance(content, list):
             content = "".join(
-                str(item.get("text", ""))
-                for item in content
-                if isinstance(item, dict)
+                str(item.get("text", "")) for item in content if isinstance(item, dict)
             )
         if not content:
             continue
@@ -195,9 +193,7 @@ async def chat_completions(request: ChatRequest, _: None = Depends(require_key))
             }
         )
         try:
-            async for delta in pool.stream_reply(
-                result, prompt, timeout=REPLY_TIMEOUT
-            ):
+            async for delta in pool.stream_reply(result, prompt, timeout=REPLY_TIMEOUT):
                 if not delta:
                     continue
                 yield chunk(

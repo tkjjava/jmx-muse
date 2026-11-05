@@ -71,9 +71,7 @@ def test_redacted_has_no_profile(store):
 
 
 def test_dispatchable_filters_expired(store):
-    store.upsert(
-        "good", cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert("good", cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
     store.upsert(
         "bad", cdp_url="http://127.0.0.1:9222", state=AccountState.SESSION_EXPIRED
     )
@@ -82,9 +80,7 @@ def test_dispatchable_filters_expired(store):
 
 
 def test_stale_probe_not_dispatchable(store):
-    store.upsert(
-        "old", cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert("old", cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
     # 把探针时间推到 20 分钟前
     store._conn.execute(
         "UPDATE accounts SET last_probe_ok_at=? WHERE account=?",
@@ -95,9 +91,7 @@ def test_stale_probe_not_dispatchable(store):
 
 
 def test_touch_refresh_updates_timestamp(store):
-    store.upsert(
-        "muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert("muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
     before = store.get("muse-main").refreshed_at
     time.sleep(0.01)
     store.touch_refresh("muse-main")
@@ -117,9 +111,7 @@ async def test_dispatch_marks_browser_unavailable(store, monkeypatch):
     """CDP 连不上时应把账号标成 browser_unavailable，而不是崩掉。"""
     from muse_bridge import driver as driver_module
 
-    store.upsert(
-        "muse-main", cdp_url="http://127.0.0.1:9999", state=AccountState.READY
-    )
+    store.upsert("muse-main", cdp_url="http://127.0.0.1:9999", state=AccountState.READY)
 
     class FakeDriver:
         def __init__(self, cdp_url):
@@ -144,9 +136,7 @@ async def test_dispatch_marks_browser_unavailable(store, monkeypatch):
 async def test_dispatch_marks_not_logged_in(store, monkeypatch):
     from muse_bridge import driver as driver_module
 
-    store.upsert(
-        "muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert("muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
 
     class FakeDriver:
         def __init__(self, cdp_url):
@@ -172,9 +162,7 @@ async def test_dispatch_marks_not_logged_in(store, monkeypatch):
 async def test_dispatch_success_returns_driver(store, monkeypatch):
     from muse_bridge import driver as driver_module
 
-    store.upsert(
-        "muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert("muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
 
     class FakeDriver:
         def __init__(self, cdp_url):
@@ -204,9 +192,7 @@ async def test_dispatch_success_returns_driver(store, monkeypatch):
 @pytest.mark.asyncio
 async def test_stream_reply_concatenates(store, monkeypatch):
     """流式增量应能拼成完整回答。"""
-    store.upsert(
-        "muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert("muse-main", cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
 
     class FakeDriver:
         def __init__(self, cdp_url):
@@ -249,7 +235,7 @@ def test_monotonic_growth_produces_deltas():
     deltas = []
     for current in snapshots:
         if current.startswith(last):
-            delta = current[len(last):]
+            delta = current[len(last) :]
         elif current != last:
             delta = current
         else:
@@ -265,5 +251,5 @@ def test_non_monotonic_rerender_resends_whole():
     """页面重绘导致文本不以旧值开头时，应整体重发而不是丢弃。"""
     last = "你好世界"
     current = "全新的回答"
-    delta = current[len(last):] if current.startswith(last) else current
+    delta = current[len(last) :] if current.startswith(last) else current
     assert delta == "全新的回答"

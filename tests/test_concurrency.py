@@ -58,9 +58,7 @@ class FakeDriver:
 
 
 def _add(store: AccountStore, name: str) -> None:
-    store.upsert(
-        name, cdp_url="http://127.0.0.1:9222", state=AccountState.READY
-    )
+    store.upsert(name, cdp_url="http://127.0.0.1:9222", state=AccountState.READY)
 
 
 class TestLocking:
