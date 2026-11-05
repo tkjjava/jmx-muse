@@ -14,6 +14,10 @@
   <sub>作者：君莫笑 · 永恒之兰</sub>
 </p>
 
+<p align="center">
+  <b>中文文档</b> · <a href="README.en.md">English</a>
+</p>
+
 ---
 
 把 muse.ai（Meta "Hatch"）暴露成标准 OpenAI 兼容接口。**不含注册环节**——会话由你自己在浏览器里登录后导入。
