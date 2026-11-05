@@ -1,12 +1,38 @@
 # muse-bridge
 
-> 作者：**君莫笑**
->
-> **永恒之兰**
->
-> MIT License
+<p align="center">
+  <img alt="version" src="https://img.shields.io/badge/version-0.1.0-blue">
+  <img alt="python" src="https://img.shields.io/badge/python-3.11%2B-3776AB">
+  <img alt="tests" src="https://img.shields.io/badge/tests-46%20passed-brightgreen">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-green">
+  <img alt="transport" src="https://img.shields.io/badge/transport-CDP%20%2B%20Noise%20WS-orange">
+  <img alt="no registration" src="https://img.shields.io/badge/registration-none-critical">
+</p>
+
+<p align="center">
+  <b>把 muse.ai 暴露成标准 OpenAI 兼容接口</b><br>
+  <sub>作者：君莫笑 · 永恒之兰</sub>
+</p>
+
+---
 
 把 muse.ai（Meta "Hatch"）暴露成标准 OpenAI 兼容接口。**不含注册环节**——会话由你自己在浏览器里登录后导入。
+
+> ⚠️ 本项目**必须**配合一个运行中且已登录的 Chrome。
+> muse 的传输层是加密 Noise WebSocket，无公开纯协议实现。
+
+## 特性
+
+| | |
+|---|---|
+| **OpenAI 兼容** | `/v1/chat/completions`（含 SSE 流式）、`/v1/models` |
+| **CDP 驱动** | 复用你已登录的 Chrome，只断开不关闭 |
+| **选择器集中** | 前端改版只改 `selectors.py` 一个文件 |
+| **并发安全** | 账号级互斥锁，覆盖整个请求含流式输出 |
+| **会话续期** | 页面内 fetch 续 `hatch_vml`（48h）+ VM 唤醒 |
+| **加密存储** | SQLite + Fernet，密钥缺失直接抛错 |
+| **自检工具** | `python -m muse_bridge.doctor` 五项逐一验证 |
+| **零注册代码** | 不介入 Meta OAuth，不做任何登录自动化 |
 
 ```
 OpenAI 客户端 ──▶ muse-bridge  :8788/v1  ──▶ CDP 驱动真实 Chrome ──▶ muse.ai
