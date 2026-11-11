@@ -702,6 +702,112 @@ async def test_fallback_then_browser_unavailable_is_classified(store, monkeypatc
     assert pool.busy_accounts() == [], "失败出口也必须把锁放掉"
 
 
+class ExplodingBrowserDriver(FakeBrowserDriver):
+    """构造即失败：模拟 `connect()` 里新开标签页后 goto 不通。
+
+    真实成因（2026-11-11 用失效代理实测）：CDP 连得上，但 Chrome 里没有现成的
+    muse.ai 标签页，`_pick_muse_page` 就 `new_page()` + `goto(SITE)`；出口断网时
+    playwright 抛 `ERR_CONNECTION_CLOSED`。修复前那是裸 Error，冲出 dispatch
+    一路冒到 ASGI，用户只拿到 `500 Internal Server Error`。
+    """
+
+    def __init__(self, cdp_url: str = "") -> None:
+        raise BrowserUnavailable(
+            "打开的 https://muse.ai/ 页面加载失败：Page.goto: net::ERR_CONNECTION_CLOSED"
+        )
+
+
+@pytest.mark.asyncio
+async def test_build_driver_browser_unavailable_is_classified_not_crashed(
+    store, monkeypatch
+):
+    """**构造期**抛 BrowserUnavailable 也必须被分类，不能变成 500。
+
+    这条钉的是"异常发生在哪一步"：`_build_driver` 在状态探测循环之前调用，
+    那里的异常以前没有任何 except 接，于是单账号的浏览器故障会升级成整个
+    请求的 500。正确行为与"探状态时抛"一致：记 browser_unavailable、换下一个号。
+    """
+    monkeypatch.delenv("MUSE_PROTOCOL_DRIVER", raising=False)
+    monkeypatch.setattr(pool, "MuseDriver", ExplodingBrowserDriver)
+    _add(store, "构造失败号")
+
+    result = await pool.dispatch(store)
+
+    assert result.ok is False
+    assert result.verdict == "all_accounts_failed"
+    assert "ERR_CONNECTION_CLOSED" in result.note
+    record = store.get("构造失败号")
+    assert record is not None
+    assert record.state is AccountState.BROWSER_UNAVAILABLE
+    assert "ERR_CONNECTION_CLOSED" in (record.last_error or "")
+    assert pool.busy_accounts() == [], "构造期失败也必须把锁放掉"
+
+
+@pytest.mark.asyncio
+async def test_build_driver_failure_falls_over_to_next_account(store, monkeypatch):
+    """一个号的浏览器坏了，另一个号还能派单：必须换号成功，而不是整体失败。"""
+    monkeypatch.delenv("MUSE_PROTOCOL_DRIVER", raising=False)
+    _add(store, "坏号")
+    _add(store, "好号")
+
+    real = MuseDriver
+    built: list[str] = []
+
+    def factory(cdp_url: str = ""):
+        # 第一个号用爆炸驱动，其余用正常假件。用计数决定，避免依赖排序。
+        built.append(cdp_url)
+        if len(built) == 1:
+            return ExplodingBrowserDriver(cdp_url)
+        return FakeBrowserDriver(cdp_url)
+
+    monkeypatch.setattr(pool, "MuseDriver", factory)
+
+    result = await pool.dispatch(store)
+    try:
+        assert result.ok is True, "坏号不该拖垮整个请求"
+        assert isinstance(result.driver, FakeBrowserDriver)
+        assert result.account == "好号"
+    finally:
+        await result.release()
+    assert real is not None  # 只是证明没把真类换成别的东西
+
+
+@pytest.mark.asyncio
+async def test_connected_false_is_not_misread_as_session_expired(store, monkeypatch):
+    """`status.connected is False` 必须记成 browser_unavailable，不能记成会话过期。
+
+    为什么这条是**真缺口**：真实 `MuseDriver.status()` 会把 `connect()` 抛出的
+    `BrowserUnavailable` **吞掉**，返回 `connected=False, logged_in=False`；
+    而 `pool.dispatch` 只看 `logged_in`，于是"浏览器连不上"被记成
+    `SESSION_EXPIRED`。两种状态的冷却与重试语义不同，误记会让账号按"会话过期"
+    处理（要求重新登录），而真正该做的是等浏览器/网络恢复。
+    """
+    monkeypatch.delenv("MUSE_PROTOCOL_DRIVER", raising=False)
+
+    class DisconnectedDriver(FakeBrowserDriver):
+        async def status(self) -> BrowserStatus:
+            # 复刻真实 MuseDriver.status() 的行为：不抛，返回 connected=False。
+            return BrowserStatus(
+                connected=False,
+                logged_in=False,
+                note="无法连接 CDP http://127.0.0.1:9222",
+            )
+
+    monkeypatch.setattr(pool, "MuseDriver", DisconnectedDriver)
+    _add(store, "断连号")
+
+    result = await pool.dispatch(store)
+
+    assert result.ok is False
+    record = store.get("断连号")
+    assert record is not None
+    assert record.state is AccountState.BROWSER_UNAVAILABLE, (
+        f"应为 browser_unavailable，实际 {record.state}"
+    )
+    assert "CDP" in (record.last_error or "")
+    assert pool.busy_accounts() == []
+
+
 def test_driver_label_distinguishes_protocol_from_browser(monkeypatch):
     """响应头 `X-Muse-Driver` 的判据：协议驱动 vs 浏览器（含回退后）。
 

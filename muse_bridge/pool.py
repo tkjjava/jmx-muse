@@ -238,8 +238,24 @@ async def dispatch(
         fallback_note = ""
         handed_off = False
         try:
-            with observability.timed("warm_acquire"):
-                driver = _build_driver(store, record, capability=capability)
+            try:
+                with observability.timed("warm_acquire"):
+                    driver = _build_driver(store, record, capability=capability)
+            except BrowserUnavailable as exc:
+                # **构造期**也会抛 BrowserUnavailable：`MuseDriver.connect()` 里
+                # 没有现成 muse.ai 标签页时会新开一个再 goto，出口断网就抛
+                # （ERR_CONNECTION_CLOSED）。以前这条路径没人接，异常冲出
+                # `dispatch()` 一路冒到 ASGI，用户拿到 500 Internal Server Error，
+                # 而"为什么失败"只活在日志里。2026-11-11 用失效代理实测复现。
+                # 处理方式与"探状态时抛"保持一致：记账号状态、换下一个号，
+                # 不要把单个账号的浏览器故障升级成整个请求的 500。
+                last_error = f"{account}: {exc}"
+                store.mark_failure(
+                    account,
+                    state=AccountState.BROWSER_UNAVAILABLE,
+                    error=str(exc),
+                )
+                continue
             if isinstance(driver, ProtocolDriver):
                 observability.bump("protocol_driver_built")
             elif capability == "chat":
@@ -289,6 +305,20 @@ async def dispatch(
                     )
                     break
             if status is None:
+                continue
+
+            # `connected` 必须先判：真实 `MuseDriver.status()` 把 `connect()` 抛出的
+            # `BrowserUnavailable` **吞掉**，返回 `connected=False, logged_in=False`。
+            # 只看 `logged_in` 的话，"浏览器连不上"会被记成 SESSION_EXPIRED（要求
+            # 重新登录），而真正该做的是等浏览器/网络恢复。两种状态的冷却与重试
+            # 语义不同，误记会让账号一直卡在"等你重新登录"上。
+            if not status.connected:
+                last_error = f"{account}: 浏览器连接不可用"
+                store.mark_failure(
+                    account,
+                    state=AccountState.BROWSER_UNAVAILABLE,
+                    error=status.note or "浏览器连接不可用",
+                )
                 continue
 
             if not status.logged_in:

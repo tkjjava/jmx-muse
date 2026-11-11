@@ -362,6 +362,15 @@ async def chat_completions(
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except pool.NoAccountAvailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except BrowserUnavailable as exc:
+        # dispatch 阶段就会抛：`_pick_muse_page` 新建标签页后 goto 失败
+        # （出口断网 / ERR_CONNECTION_CLOSED）以前是裸的 playwright Error，
+        # 一路冒到 ASGI 变成 500——用户拿不到任何可读信息，而协议回退的根因
+        # 早已落进日志。这里必须接住并给可操作的文案。
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "browser_unavailable", "note": str(exc)},
+        ) from exc
 
     if not result.ok:
         raise HTTPException(

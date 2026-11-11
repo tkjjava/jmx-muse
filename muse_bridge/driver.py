@@ -154,7 +154,23 @@ class MuseDriver:
             if target in (page.url or ""):
                 return page
         page = await context.new_page()
-        await page.goto(SITE, wait_until="domcontentloaded")
+        try:
+            await page.goto(SITE, wait_until="domcontentloaded")
+        except Exception as exc:  # playwright 的异常类型随版本变化
+            # 这一步以前完全裸奔：CDP 连上了、但没有现成的 muse.ai 标签页，
+            # 于是新建一个再导航。此时若出口断网，playwright 抛的裸 Error
+            # 会一路冒到 ASGI，用户拿到的是 `500 Internal Server Error`——
+            # 协议回退的根因明明已经落进日志，调用方却看不到任何可读信息。
+            # 2026-11-11 用失效代理实测复现（ERR_CONNECTION_CLOSED）。
+            # 归到 BrowserUnavailable：这是"浏览器这条兜底通道也用不了"，
+            # 与 CDP 连不上同属一类，上层已有对应的分类与文案。
+            # 关闭失败不该盖住原始错误：用 suppress 而不是 try/except/pass。
+            with contextlib.suppress(Exception):
+                await page.close()
+            raise BrowserUnavailable(                f"打开的 {SITE} 页面加载失败：{exc}\n"
+                "出口到 muse.ai 不通时，请先确认代理可用，或手动打开并登录一个 "
+                f"{SITE} 标签页后重试。"
+            ) from exc
         return page
 
     async def close(self) -> None:
@@ -1839,3 +1855,4 @@ _JS_QUOTA_DIALOG = """(cfg) => {
   }
   return {text: ''};
 }"""
+
