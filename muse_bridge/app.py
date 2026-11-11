@@ -1236,17 +1236,38 @@ async def media_download(
 
     headers = media.serve_headers(size=ref.size, filename=ref.filename, mime=ref.mime)
     span = media.parse_range(range_header, ref.size) if range_header else None
+    if range_header and span is None and media.is_unsatisfiable_range(range_header, ref.size):
+        # 可解析但不可满足（起点越界 / 起止倒置 / suffix 为 0）：必须 416。
+        # 与"不可解析"分开判：后者按 RFC 忽略 Range 发 200 整文件。
+        # 混成一个分支，要么把垃圾头判成 416，要么把越界判成 200——后者正是
+        # 2026-11-11 活网验收抓到的 bug：`bytes=999999999-` 被 clamp 成末尾
+        # 1 字节的 206，播放器当成有效数据。
+        observability.bump("media_download_failed")
+        headers["Content-Range"] = f"bytes */{ref.size}"
+        headers["Content-Length"] = "0"
+        return Response(
+            content=b"",
+            status_code=416,
+            headers=headers,
+            media_type="application/octet-stream",
+        )
     try:
         with observability.timed("media_download"):
             if span is None:
-                if range_header:
-                    # 有 Range 头但解析不出单区间：按 HTTP 规范忽略头、发整文件。
-                    pass
+                # 无 Range，或 Range 不可解析（多区间/非 bytes=）：
+                # 按 RFC 忽略这个头，发整文件。
                 return Response(content=ms.read(ref.token), headers=headers)
             data, first, last, total = ms.read_range(ref.token, span[0], span[1])
-    except media.MediaRangeError as exc:
+    except media.MediaRangeError:
         observability.bump("media_download_failed")
-        return _error(416, str(exc), "range_not_satisfiable")
+        headers["Content-Range"] = f"bytes */{ref.size}"
+        headers["Content-Length"] = "0"
+        return Response(
+            content=b"",
+            status_code=416,
+            headers=headers,
+            media_type="application/octet-stream",
+        )
     headers["Content-Range"] = f"bytes {first}-{last}/{total}"
     headers["Content-Length"] = str(len(data))
     return Response(content=data, status_code=206, headers=headers)

@@ -21,6 +21,7 @@ from muse_bridge.media import (
     MediaNotFound,
     MediaRangeError,
     MediaStore,
+    is_unsatisfiable_range,
     kind_of,
     parse_range,
     serve_headers,
@@ -235,6 +236,12 @@ def test_ext_from_expect_fallback_matches_upstream():
         ("bytes=-10", 100, (90, 99)),
         ("bytes=0-999", 100, (0, 99)),  # 终点越界 clamp
         ("BYTES=10-20", 100, (10, 20)),  # 大小写不敏感
+        # 起点越界**不得** clamp。`bytes=999999999-` 过去会走 `not last` 分支被
+        # `min(start, size-1)` 夹回末尾，返回 206 + 末尾 1 字节。播放器会把它当成
+        # 一段有效数据，而不是"不可满足"。RFC 9110 §14.1.2 要求起点 >= 长度时
+        # 必须 416，故这里返回 None 之外的专用哨兵由上层映射（见下方 416 用例）。
+        ("bytes=200-", 100, None),
+        ("bytes=100-", 100, None),  # 起点恰等于长度：同样不可满足
         ("bytes=abc-def", 100, None),
         ("bytes=0-1,4-5", 100, None),  # 多区间：忽略而不是回半截
         ("items=0-1", 100, None),
@@ -270,6 +277,34 @@ def test_read_range_unsatisfiable_raises(store):
         store.read_range(ref.token, 20, 10)
     with pytest.raises(MediaRangeError):
         store.read_range(ref.token, 0, -1)
+
+
+@pytest.mark.parametrize(
+    "header,size,expected",
+    [
+        ("bytes=999999999-", 100, True),
+        ("bytes=100-", 100, True),   # 起点恰等于长度
+        ("bytes=50-10", 100, True),  # 起止倒置
+        ("bytes=-0", 100, True),     # suffix 0 字节
+        ("bytes=0-9", 100, False),
+        ("bytes=50-", 100, False),
+        ("bytes=-10", 100, False),
+        ("bytes=0-999", 100, False),  # 终点越界是可满足的（clamp）
+        ("bytes=0-1,4-5", 100, False),  # 多区间：不可解析，按 RFC 忽略
+        ("items=0-1", 100, False),
+        ("bytes=abc-def", 100, False),
+        ("", 100, False),
+        (None, 100, False),
+        ("bytes=0-9", 0, False),
+    ],
+)
+def test_is_unsatisfiable_range_table(header, size, expected):
+    """把"该回 416"与"该忽略这个头"分开判。
+
+    两者混成一个 None 分支时只有一个能对：要么垃圾头被判成 416，
+    要么越界被判成 200。2026-11-11 活网验收抓到的正是后者。
+    """
+    assert is_unsatisfiable_range(header, size) is expected
 
 
 # ---- 响应头 ----

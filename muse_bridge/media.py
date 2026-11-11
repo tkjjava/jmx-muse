@@ -310,6 +310,14 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
 
     只做单区间是有意的：多区间要带 multipart/byteranges 与边界串，
     它在代理链上的坑远多于它在这里的价值。
+
+    **起点越界一律返回 None，绝不 clamp**：RFC 9110 §14.1.2 规定起点 >= 资源长度
+    时该区间"不可满足"，正确响应是 416。过去 `bytes=999999999-` 走 `not last`
+    分支被 `min(start, size - 1)` 夹成 `(size-1, size-1)`，于是返回 206 + 末尾
+    1 字节——播放器会把它当成有效数据播下去，而不是报"不可满足"。这类错误
+    在代理链上表现为"视频能加载但立刻结束"，极难定位。
+    不可满足与不可解析都返回 None 时上层无法区分，因此调用方在拿到 None 后
+    仍要判断 header 是否是可解析的单区间（见 `is_unsatisfiable_range`）。
     """
     if not header or size <= 0:
         return None
@@ -337,13 +345,57 @@ def parse_range(header: str | None, size: int) -> tuple[int, int] | None:
         return None
     if start < 0:
         return None
+    if start >= size:
+        # 起点越界：不可满足。交给 `is_unsatisfiable_range` 判成 416。
+        return None
     if not last:
-        return min(start, size - 1), size - 1
+        return start, size - 1
     try:
         end = int(last)
     except ValueError:
         return None
+    if end < start:
+        # `bytes=50-10` 是语义非法，同样不可满足，不能悄悄发整文件。
+        return None
     return start, min(end, size - 1)
+
+
+def is_unsatisfiable_range(header: str | None, size: int) -> bool:
+    """该 Range 是否是"可解析但不可满足"，也就是该回 416 的那种。
+
+    为什么要与 `parse_range` 分成两个函数：不可解析的头按 RFC 应当**忽略**
+    （发 200 整文件），而不可满足的区间必须 **416**。两者混成一个 None，
+    要么把垃圾头判成 416，要么把越界判成 200——两种都是错的。
+    """
+    if not header or size <= 0:
+        return False
+    text = str(header).strip()
+    if not text.lower().startswith("bytes="):
+        return False
+    specs = [item.strip() for item in text[6:].split(",") if item.strip()]
+    if len(specs) != 1:
+        return False
+    first, sep, last = specs[0].partition("-")
+    if not sep or (not first and not last):
+        return False
+    if not first:
+        # `bytes=-N`：suffix 形式永远可满足（N>0 时），不是 416 的来源。
+        try:
+            return int(last) <= 0
+        except ValueError:
+            return False
+    try:
+        start = int(first)
+    except ValueError:
+        return False
+    if start < 0 or start >= size:
+        return True
+    if last:
+        try:
+            return int(last) < start
+        except ValueError:
+            return False
+    return False
 
 
 def serve_headers(*, size: int, filename: str, mime: str = "") -> dict[str, str]:
