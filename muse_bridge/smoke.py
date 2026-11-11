@@ -21,10 +21,35 @@ import time
 import urllib.error
 import urllib.request
 
-PORT = int(os.environ.get("MUSE_BRIDGE_PORT", "18788"))
+from .env import env_port
+
+PORT = env_port("MUSE_BRIDGE_PORT", "18788")
 BASE = f"http://127.0.0.1:{PORT}"
 TIMEOUT_SECONDS = 40.0
 INTERVAL = 0.5
+
+API_KEYS_ENV = "MUSE_BRIDGE_API_KEYS"
+ADMIN_KEYS_ENV = "MUSE_BRIDGE_ADMIN_KEYS"
+
+
+class AuthRequired(RuntimeError):
+    """服务端启用了 API 密钥而冒烟没带——这是配置问题，不是服务故障。"""
+
+
+def _auth_headers(path: str = "") -> dict[str, str]:
+    """服务端配了密钥就带上第一把，没配就不带（默认行为一字不变）。
+
+    `/admin/*` 优先用 `MUSE_BRIDGE_ADMIN_KEYS`：0.4.0 起管理面与调用面可以分钥匙，
+    拿调用密钥去打管理端点会被 401。留空则退回调用密钥（未分离部署仍然能跑）。
+    """
+    env = ADMIN_KEYS_ENV if str(path).startswith("/admin") else API_KEYS_ENV
+    raw = os.environ.get(env, "") or (
+        os.environ.get(API_KEYS_ENV, "") if env == ADMIN_KEYS_ENV else ""
+    )
+    first = next((key.strip() for key in raw.split(",") if key.strip()), "")
+    return {"Authorization": f"Bearer {first}"} if first else {}
+
+
 
 
 def ensure_utf8_stdout() -> None:
@@ -41,8 +66,18 @@ def ensure_utf8_stdout() -> None:
 
 
 def _get(path: str) -> dict:
-    with urllib.request.urlopen(f"{BASE}{path}", timeout=5) as response:
-        return json.loads(response.read().decode())
+    request = urllib.request.Request(f"{BASE}{path}", headers=_auth_headers(path))
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            hint = ADMIN_KEYS_ENV if path.startswith("/admin") else API_KEYS_ENV
+            raise AuthRequired(
+                f"{path} 返回 401：服务端启用了鉴权（{hint}）。"
+                f"请在同一环境里设置 {hint} 后重跑冒烟。"
+            ) from exc
+        raise
 
 
 def wait_until_ready() -> bool:
@@ -53,7 +88,7 @@ def wait_until_ready() -> bool:
             payload = _get("/healthz")
             if payload.get("status") == "ok":
                 return True
-        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        except (urllib.error.URLError, TimeoutError, ValueError, AuthRequired) as exc:
             last_error = str(exc)
         time.sleep(INTERVAL)
     print(f"服务在 {TIMEOUT_SECONDS}s 内未就绪: {last_error}", file=sys.stderr)
@@ -82,7 +117,11 @@ def main() -> int:
         health = _get("/healthz")
         print("healthz:", json.dumps(health, ensure_ascii=False))
 
-        models = _get("/v1/models")
+        try:
+            models = _get("/v1/models")
+        except AuthRequired as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         count = len(models.get("data") or [])
         print(f"models: {count}")
         if count == 0:

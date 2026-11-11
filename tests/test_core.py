@@ -9,6 +9,7 @@ import pytest
 from muse_bridge import pool, selectors
 from muse_bridge.state import (
     HEARTBEAT_INTERVAL_SECONDS,
+    RETRY_COOLDOWN_SECONDS,
     VML_WARN_SECONDS,
     AccountState,
     after_probe,
@@ -76,6 +77,46 @@ def test_vm_sleeping_still_dispatchable():
     """VM 休眠可以派单——派单前会先 wake。"""
     now = int(time.time())
     assert is_dispatchable(AccountState.VM_SLEEPING, now=now, last_probe_ok_at=now - 30)
+
+
+def test_transient_states_return_after_cooldown():
+    """限流 / 浏览器暂时拿不到不该永久踢号：冷却期满自动回池。"""
+    now = int(time.time())
+    for state in (AccountState.RATE_LIMITED, AccountState.BROWSER_UNAVAILABLE):
+        assert not is_dispatchable(
+            state, now=now, last_probe_ok_at=now - 60, last_failure_at=now
+        )
+        assert not is_dispatchable(
+            state,
+            now=now + RETRY_COOLDOWN_SECONDS - 1,
+            last_probe_ok_at=now - 60,
+            last_failure_at=now,
+        )
+        assert is_dispatchable(
+            state,
+            now=now + RETRY_COOLDOWN_SECONDS,
+            last_probe_ok_at=now - 60,
+            last_failure_at=now,
+        )
+
+
+def test_transient_without_failure_time_stays_out():
+    """没有失败时间戳就无从判断冷却，宁可先不派单。"""
+    now = int(time.time())
+    assert not is_dispatchable(
+        AccountState.RATE_LIMITED, now=now, last_probe_ok_at=now, last_failure_at=None
+    )
+
+
+def test_session_expired_never_auto_recovers():
+    """会话真失效需要人工重新登录，冷却不能把它放回来。"""
+    now = int(time.time())
+    assert not is_dispatchable(
+        AccountState.SESSION_EXPIRED,
+        now=now + 10 * RETRY_COOLDOWN_SECONDS,
+        last_probe_ok_at=now,
+        last_failure_at=now,
+    )
 
 
 def test_after_probe_maps_states():

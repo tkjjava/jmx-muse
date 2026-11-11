@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import shutil
 import tempfile
 
 import httpx
@@ -76,31 +78,44 @@ def check_store() -> CheckResult:
     try:
         from .state import AccountState
         from .store import AccountStore
+    except Exception as exc:
+        result.detail = f"{type(exc).__name__}: {exc}"
+        result.hint = "确认依赖安装完整"
+        return result
 
-        with tempfile.TemporaryDirectory() as tmp:
-            store = AccountStore(os.path.join(tmp, "probe.db"))
-            store.upsert(
-                "__probe__",
-                cdp_url="http://127.0.0.1:9222",
-                state=AccountState.READY,
-                profile={"marker": "probe-secret-value"},
-                vm_ready=True,
-            )
-            record = store.get("__probe__")
-            with open(os.path.join(tmp, "probe.db"), "rb") as handle:
-                raw = handle.read()
-            store.close()
-
-        if record is None or record.account != "__probe__":
-            result.detail = "写入后读回不一致"
-            return result
-        if b"probe-secret-value" in raw:
-            result.detail = "profile 以明文落盘"
-            result.hint = "这是严重问题，请提 issue"
-            return result
+    # mkdtemp 而不是 TemporaryDirectory：Windows 上库文件被句柄占住时 rmtree 会抛
+    # PermissionError，那个异常会盖掉真正的失败原因（例如写库本身报错），
+    # doctor 就会把"写库失败"报成"检查 data 目录写权限"——在排障工具里这是最坏的结果。
+    tmp = tempfile.mkdtemp(prefix="muse-doctor-")
+    store = None
+    try:
+        store = AccountStore(os.path.join(tmp, "probe.db"))
+        store.upsert(
+            "__probe__",
+            cdp_url="http://127.0.0.1:9222",
+            state=AccountState.READY,
+            profile={"marker": "probe-secret-value"},
+            vm_ready=True,
+        )
+        record = store.get("__probe__")
+        with open(os.path.join(tmp, "probe.db"), "rb") as handle:
+            raw = handle.read()
     except Exception as exc:
         result.detail = f"{type(exc).__name__}: {exc}"
         result.hint = "检查 data 目录写权限"
+        return result
+    finally:
+        if store is not None:
+            with contextlib.suppress(Exception):
+                store.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    if record is None or record.account != "__probe__":
+        result.detail = "写入后读回不一致"
+        return result
+    if b"probe-secret-value" in raw:
+        result.detail = "profile 以明文落盘"
+        result.hint = "这是严重问题，请提 issue"
         return result
 
     result.ok = True
@@ -191,17 +206,26 @@ async def _run(cdp_url: str) -> int:
     cdp = await check_cdp(cdp_url)
     results.append(cdp)
 
-    # 前四项都过了才检查登录态，否则报错会层层叠加
+    # 前四项都过了才检查登录态，否则报错会层层叠加。
+    # 跳过必须明确说出来：否则输出里看不到这一项，会被当成"检查过且没问题"。
+    skipped_checks: list[str] = []
     if all(item.ok for item in results):
         results.append(await check_logged_in())
+    else:
+        skipped_checks.append("muse.ai 登录态（前置检查未通过）")
 
     for item in results:
         print(item)
 
     failed = [item for item in results if not item.ok]
+    for name in skipped_checks:
+        print(f"  ⊘ 已跳过 {name}")
     print()
     if failed:
         print(f"{len(failed)} 项未通过")
+        return 1
+    if skipped_checks:
+        print(f"{len(skipped_checks)} 项被跳过，不能判定为全部通过")
         return 1
     print("全部通过")
     return 0

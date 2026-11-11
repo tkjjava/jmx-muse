@@ -11,14 +11,21 @@ from __future__ import annotations
 
 from enum import Enum
 
+from .env import env_positive_int
+
 # 探针超过这个时间不再信任
 PROBE_TTL_SECONDS = 15 * 60
 
 # hatch_vml 约 48 小时过期，提前 6 小时提醒续期
 VML_WARN_SECONDS = 6 * 3600
 
-# 心跳间隔：每 30 分钟打一次 /api/session 续期
+# 心跳间隔：每 30 分钟打一次 /api/session 续期。
+# 尚未实现后台心跳——会话续期目前只能人工触发（/console 或 /admin/refresh）。
 HEARTBEAT_INTERVAL_SECONDS = 30 * 60
+
+# 瞬时故障冷却（秒）：限流 / 浏览器暂时拿不到，冷却期满自动回池。
+# 没有这层，一个慢回复就把账号从池子里永久摘掉，只能人工 refresh 复活。
+RETRY_COOLDOWN_SECONDS = env_positive_int("MUSE_BRIDGE_RETRY_COOLDOWN", "60")
 
 
 class AccountState(str, Enum):
@@ -46,18 +53,34 @@ DISPATCHABLE_STATES = frozenset(
     {AccountState.READY, AccountState.VM_SLEEPING, AccountState.VML_EXPIRING}
 )
 
+# 瞬时故障：不永久踢号，冷却期满自动回到池子
+RETRYABLE_STATES = frozenset(
+    {AccountState.RATE_LIMITED, AccountState.BROWSER_UNAVAILABLE}
+)
+
 
 def is_dispatchable(
     state: AccountState,
     *,
     now: int,
     last_probe_ok_at: int | None,
+    last_failure_at: int | None = None,
+    retry_cooldown: int = RETRY_COOLDOWN_SECONDS,
 ) -> bool:
     """派单闸门。
 
     muse 的会话不存在"到期时间"这个字段可读（前端不暴露），
     因此只靠探针新鲜度判定。VM_SLEEPING 允许派单——派单前会先 wake。
+
+    瞬时故障（限流、浏览器暂时拿不到）不永久踢号：冷却期满自动回池。
+    这类状态不要求探针新鲜——恰恰是没人探它才会一直卡在冷却里；
+    派单时仍会先 status() 探一次，会话真失效会在那里被改成
+    SESSION_EXPIRED（终态，必须人工重新登录）。
     """
+    if state in RETRYABLE_STATES:
+        if last_failure_at is None:
+            return False
+        return now - last_failure_at >= retry_cooldown
     if state not in DISPATCHABLE_STATES:
         return False
     if last_probe_ok_at is None:

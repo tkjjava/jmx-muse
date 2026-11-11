@@ -116,12 +116,13 @@ class TestStreamTimeout:
         result = await pool.dispatch(store)
         chunks = []
         try:
-            async for delta in pool.stream_reply(result, "问题", timeout=0.12):
-                chunks.append(delta)
+            with pytest.raises(pool.ReplyTimeout):
+                async for delta in pool.stream_reply(result, "问题", timeout=0.12):
+                    chunks.append(delta)
         finally:
             await result.release()
 
-        # 0.12 秒 ÷ 0.05 秒 ≈ 2~3 块，肯定不是 100 块
+        # 0.12 秒 ÷ 0.05 秒 ≈ 2~3 块：既不能无限产出，也必须让调用方知道被截断了
         assert 0 < len(chunks) < 100
 
 
@@ -129,3 +130,20 @@ class TestHarkEmptyReply:
     def test_setup(self):
         """占位：hark 的空回复判定在 test_core 里覆盖。"""
         assert True
+
+    @pytest.mark.asyncio
+    async def test_event_stream_reports_deadline_instead_of_silent_stop(self, store, monkeypatch):
+        """事件接口到点必须抛 ReplyTimeout：静默 return 会让上层报 finish_reason=stop。"""
+        monkeypatch.setattr(pool, "MuseDriver", SlowDriver)
+        _add(store, "a")
+
+        result = await pool.dispatch(store)
+        seen = []
+        try:
+            with pytest.raises(pool.ReplyTimeout):
+                async for event in pool.stream_reply_events(result, "问题", timeout=0.12):
+                    seen.append(event)
+        finally:
+            await result.release()
+
+        assert seen, "截断前已经产出的增量必须照常交付"
