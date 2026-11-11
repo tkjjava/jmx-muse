@@ -317,6 +317,27 @@ class MuseDriver:
         except AssistantTextMissing:
             return ""
 
+    async def _last_assistant_id(self) -> str:
+        """最后一条助手消息的稳定身份（`data-message-id`）；读不到时返回空串。
+
+        为什么需要它：判断"页面有没有反应"不能只看正文变没变。muse 的助手气泡带
+        `data-message-id`（实测形如 `assistant-msg-<uuid>`），新回答一定拿到新 id。
+        只比正文时，**回答内容与上一条逐字相同**（比如连续问"只回复 OK"）会被判成
+        "还是上一条旧消息"——真机表现为发出去明明成功了，却在 45 秒后抛
+        「页面没有任何反应」的 504，账号还被标成 rate_limited。2026-11-11 复现：
+        手工发同一条消息能出 `OK`，走桥必 504。
+
+        没有 id 的页面（老版本 DOM）返回空串，调用方回退到"比正文"的旧判据，
+        行为与改动前一致。
+        """
+        if self._page is None:
+            return ""
+        try:
+            value = await self._page.evaluate(_JS_LAST_ASSISTANT_ID)
+        except Exception:
+            return ""
+        return value if isinstance(value, str) else ""
+
 
     async def _reasoning_text(self) -> str:
         """取最后一段思考文本。开关关闭时恒返回空串——与没有此功能时一致。"""
@@ -370,6 +391,7 @@ class MuseDriver:
         quiet = (quiet_ms if quiet_ms is not None else QUIET_MS) / 1000.0
 
         before = await self._assistant_text_or_empty()
+        before_id = await self._last_assistant_id()
         await self._send(prompt)
 
         reaction = first_reaction if first_reaction is not None else FIRST_REACTION_SECONDS
@@ -386,12 +408,22 @@ class MuseDriver:
             await asyncio.sleep(POLL_INTERVAL)
             current = await self._assistant_text_or_empty()
             reasoning_now = await self._reasoning_text()
+            current_id = await self._last_assistant_id()
+
+            # "页面还停在发送前那条消息上"=本回合没有任何反应。判据优先用消息 id：
+            # 新回答必然换 `data-message-id`，所以"内容与上一条相同"（连续问同一句
+            # 得到同一个回答）不会再被误判成没反应。两侧 id 都读得到才用 id 判据，
+            # 否则回退到比正文——老 DOM 与读取抖动都落回改动前的行为。
+            if before_id and current_id:
+                unchanged = current_id == before_id and current == before
+            else:
+                unchanged = current == before
 
             # 三条证据都指向"页面根本没反应"：没有新气泡、没有思考、也没有
             # 流式标记。此时不必等到 timeout——那会把"没发出去"误报成"模型慢"。
             if (
-                not reasoning_now
-                and current == before
+                unchanged
+                and not reasoning_now
                 and time.monotonic() >= reaction_deadline
                 and not await self._is_streaming()
             ):
@@ -400,7 +432,7 @@ class MuseDriver:
                     "（页面上连新气泡都没出现，不是模型慢）"
                 )
 
-            if current and current == before:
+            if unchanged:
                 # 正文还是上一条消息——思考容器里装的自然也是上一轮的旧思考。
                 # 之前只跳过"思考为空"的情况，导致第二轮开头的整段旧思考
                 # 与空基线做差后被当成新思考外泄（last_reasoning 跨请求不共享）。
@@ -1845,6 +1877,22 @@ _JS_INSIDE_USER = (
     '[data-hatch-user-message-body="true"]'
     "'))"
 )
+
+#: 最后一条助手消息的 `data-message-id`。`[data-message-item]` 是 2026-11-11
+#: 真机确认的消息项容器，id 形如 `assistant-msg-<uuid>`；第二个选择器只是
+#: 兜底（万一这版构建没给 message-item 包壳）。
+_JS_LAST_ASSISTANT_ID = """
+() => {
+  const pick = (nodes) => nodes.length
+    ? nodes[nodes.length - 1].getAttribute('data-message-id') || ''
+    : '';
+  const items = document.querySelectorAll(
+    '[data-message-item][data-message-role="assistant"]'
+  );
+  if (items.length) return pick(items);
+  return pick(document.querySelectorAll('[data-message-role="assistant"]'));
+}
+"""
 
 
 _JS_QUOTA_DIALOG = """(cfg) => {
