@@ -214,20 +214,54 @@ LB 入口 101 升级 + Noise msg2（166 字节）+ msg3 + split 全通，而同�
 
 #### B4 relay 兼容性
 
-本机实测 **没有 relay 环境**：3000 端口是 OpenMAIC 前端（Next.js），
-且无 one-api / new-api / litellm / gateway 在跑。按 roadmap §B4 自己的规则
-（"暂时没有 relay 环境 → 保留未验收，不虚构兼容结论"），**下游透传仍记为未验收**。
+**先纠正上一轮的判断**：当时记的是"本机没有 relay 环境"。实际上是**有的**——
+`Muse-Relay-V1.12.8` 就在 `D:\deep seek\relay\`，只是它默认读
+`server/upstreams.json`（该文件不存在），没设 `RELAY_CONFIG` 就只报
+`503 No healthy, enabled and configured upstream`。把配置指向
+`server/upstreams.bridges.json` 后 routes 变成 2，链路立刻通了。
 
-能证明的是上游一半——bridge 自己没在序列化时丢字段：
+本机真实链路：relay `:8765` → bridge `:8788`（模型 `muse-1` → 上游 `muse-spark-1.3`）。
 
-| 检查项 | 结果 |
+| 层 | 结果 |
 | --- | --- |
-| 非流式 `message.media` 字段齐全 | ✓ |
-| 流式 `delta.media` 字段齐全 | ✓ |
-| 两者字段集完全相同 | ✓ |
-| 两处 url 均可下载且 sha256 一致 | ✓ |
+| 非流式 `message.media` 经 relay 保留 | ✓ 字段齐全 |
+| 流式 `delta.media` 经 relay 保留 | ✓ 帧不被重组，`[DONE]` 正常 |
+| 两形态字段集逐项相同 | ✓（`仅非流式=[] 仅流式=[]`） |
+| 按响应里的 `url` 下载 | ✓ `200`，`sha256` 与声明一致 |
 
-这四条是 relay 透传的**必要前提**，不是透传本身的证据。
+**并因此抓到一个真实部署缺陷（第 5 个 bug）**：`media.url` 是**相对路径**
+`/v1/media/<token>`。相对是对的——桥不知道自己在网关后面，写死绝对地址换域名就
+失效——但客户端是按**网关的 origin** 解析它，而 relay 原先没有这条路由。同一
+token 对照：直连桥 `200` / 392122 字节，经网关 `404`。表现是"字段齐全、链接打
+不开"，很容易被误诊成"网关把 media 字段吃了"。
+
+修在 relay 侧（`media_passthrough`，V1.13.0）：
+
+- `GET`/`HEAD /v1/media/{token}`，按序转发给"已启用 + 已配置 + 未 drain"的上游；
+- 透传 `Range`/`If-Range`/`If-None-Match`/`If-Modified-Since`、`206` 与
+  `Content-Range`；
+- **`416` 必须透传**：吞成 404 会让客户端以为文件被删并重建索引，把一次可恢复
+  的 Range 错误升级成误判；
+- 鉴权与聊天同源，**不记 token 用量**（下载不是推理，计 0 只会在报表里添噪）。
+
+修复后实测：`200` 且 sha256 一致、`HEAD` 200 空体、`Range: bytes=0-1023` → `206`、
+越界 → `416`、坏 token → `404`、无 key → `401`。relay 全量
+`344 passed / 7 skipped`（另 1 条既有用例在本机静默崩溃，已用**原始未修改包**
+复现，判定为环境侧既有问题，非本次引入）。
+
+**同时补掉 bridge 侧一个缺口（第 6 个 bug）**：`/v1/media` 只挂了 `GET`，
+`HEAD` 返回 **405**。播放器、CDN 回源、下载管理器普遍先发 HEAD 探
+`Content-Length`/`Accept-Ranges`，405 会让它们直接放弃——成品明明在却播不了。
+现在 HEAD 回头不回体，长度取自元数据、**不读文件**（几十 MB 视频零成本），
+带 `Range` 时回 206 与区间长度。三条新测试（200/206/404 各一），去掉
+`@app.head` 后全部失败，确认有承重力。
+
+`tools/accept_relay_media.py` 覆盖以上全部路径（16 项，含按客户端方式解析
+相对 url 后取件），`python tools/accept_relay_media.py` → **16/16**。
+
+之后 relay 文档同步更新：`docs/CHANGELOG.md` 增 V1.13 条目、
+`README.md` 增 V1.13.0 摘要、`tests/test_gateway.py` 增
+`test_v113_media_passthrough`。
 
 #### B5 客户端显示与下载
 

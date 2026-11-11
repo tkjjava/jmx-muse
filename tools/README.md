@@ -26,8 +26,36 @@ kwargs，才证明代理真的用上了。
 | `restart_bridge.py` | 杀掉占端口的旧进程、用当前环境起新的、等就绪 | 否 |
 | `refresh_account.py` | 刷账号探针，让 `accounts_dispatchable` 回到 1 | 否 |
 | `acceptance.py` | 成品链路、流式 SSE、清扫计数、（可选）协议生成 | `generation` 会 |
+| `accept_video.py` | 视频端到端：任务轮询、`ftyp` 魔数、Range 分段、时长 | 会 |
+| `accept_relay_media.py` | 经 relay 验媒体字段透传 + **按客户端方式取件** | 会 |
 | `diff_check.py` | 差分检查：某个测试在修复前必须失败、修复后必须通过 | 否 |
 | `verify_tests_load_bearing.py` | 抽查测试是否真的钉住行为，而不是恒真 | 否 |
+
+### 两个"必须有真实上游产出"的验收
+
+`accept_video.py` 和 `accept_relay_media.py` 都要等上游真出东西，会消耗额度，
+不能当成 CI 用例。它们解决的是别的测试覆盖不到的那一段：
+
+- `accept_video.py`：生成一个视频任务，轮询到 `completed`，再用**魔数**（不是
+  `Content-Type`，那个固定是 `octet-stream`）确认拿到的是 MP4，并检查 Range 分段
+  返回的字节能接上。
+- `accept_relay_media.py`：把聊天请求发到 **relay**，比对非流式 `message.media` 与
+  流式 `delta.media` 的字段集，再**按客户端的方式**（以 relay 的 origin 解析相对
+  `url`）去下载、核对 `sha256`。最后这条是整个脚本的重点：字段存在不等于能用，
+  2026-11-11 就出现过"字段齐全、链接 404"（relay 缺 `/v1/media` 路由）。
+
+```bash
+# 视频端到端（会消耗额度）
+python tools/accept_video.py
+
+# 经 relay 的媒体验收（先起 relay，并把客户端 key 放进环境）
+MUSE_TOOLS_API_KEY=<relay 客户端 key> \
+python tools/accept_relay_media.py --relay http://127.0.0.1:8765 --model muse-1
+```
+
+`accept_relay_media.py` 需要注意一点：**不要断言两个请求的 sha256 相同**。非流式
+和流式是两次独立生成，出来的图本来就不一样；要比的是同一次请求里"声明值 vs 实测值"。
+
 
 ## 常用命令
 
