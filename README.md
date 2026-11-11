@@ -67,7 +67,9 @@ WS URL 里内嵌签名的 `auth_token` / `notary_token`。社区项目（muse2ap
 **协议生成失败（可重试类）的一次回退**、以及**首次登录 / attach / 导出 cookie**
 这类一次性引导。会话续期（`refresh` / `keepalive` / `wake`）在导入 cookie 后
 全部走纯 HTTP，不再需要浏览器窗口在跑。两条通道由 `MUSE_PROTOCOL_DRIVER`
-开关与账号是否导入 cookie 决定。
+开关与账号是否导入 cookie 决定；**推荐用 `python tools/protocol_flow.py` 做一次性
+引导**（抓已登录 Chrome 的 cookie 导入桥 → 纯 HTTP 续期 → 验证 `chat_driver=protocol`），
+之后运行期只有协议，浏览器只剩额度面板与协议生成失败的一次性回退。
 
 按功能看（2026-11-11 11:5x 实测口径）：
 
@@ -150,9 +152,22 @@ python -m muse_bridge.doctor
 python -m muse_bridge
 ```
 
-### 4. 导入会话
+### 4. 导入会话（一次性引导，之后运行期无浏览器）
 
-打开 <http://127.0.0.1:8788/console>，或直接调：
+**推荐：一条命令完成"抓 cookie → 导入 → 纯 HTTP 续期 → 验证"**：
+
+```bash
+export MUSE_PROTOCOL_DRIVER=1          # 协议开关（必开，否则 /healthz 会显示 browser）
+export MUSE_PROTOCOL_PROXY=http://127.0.0.1:7890   # 本机出口；按你的实际代理改
+python tools/protocol_flow.py          # 从已登录 Chrome 抓 muse.ai cookie 导入桥
+python tools/protocol_flow.py --verify-chat   # 再验一次 X-Muse-Driver: protocol
+```
+
+它幂等、不打印 cookie 值；导入后 `refresh/keepalive/wake` 全走外层 HTTP，聊天/生成
+走 Noise 协议，**运行期不需要保持那个 Chrome 开着**（开新窗口/换号时重跑一次即可）。
+relay 侧的 `scripts\setup-multiuser.ps1` 会自动把上面两个变量写进用户环境。
+
+**替补路径**（没有调试端口、想走授权台时）：
 
 ```bash
 curl -X POST http://127.0.0.1:8788/admin/attach \
@@ -160,7 +175,8 @@ curl -X POST http://127.0.0.1:8788/admin/attach \
   -d '{"account": "me-main", "label": "主号"}'
 ```
 
-它会连接 CDP、检查 muse.ai 是否已登录、把会话状态记入池。
+`attach` 连接 CDP、检查 muse.ai 是否已登录、把会话状态记入池；它比 `protocol_flow.py`
+少一步"导入 cookie"，因此运行期仍依赖浏览器保底。
 
 ### 5. 调用
 

@@ -35,8 +35,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import re
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -151,7 +153,19 @@ def audit() -> dict:
     }
 
 
+def _utf8_console() -> None:
+    """Windows 控制台默认 GBK：带 ✓/✗ 的中文输出会 UnicodeEncodeError 崩在最后一行。
+
+    审计本身已经跑完了，却在打印结论时抛异常——退出码因此变成 1，看起来像"文档失效"。
+    这里统一把 stdout/stderr 换成 UTF-8（不支持时静默跳过，非 Windows 无影响）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     parser = argparse.ArgumentParser(description="文档断言审计")
     parser.add_argument("--json", action="store_true", help="机读输出")
     parser.add_argument("--strict", action="store_true", help="含糊时刻 > 0 也算失败")
