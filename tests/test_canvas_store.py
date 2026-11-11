@@ -149,6 +149,31 @@ def test_list_orders_by_updated_at_desc(store):
     }
 
 
+def test_update_outranks_same_second_create(store, monkeypatch):
+    """同一秒内先建 A 再改 B：改过的 B 必须排第一。
+
+    旧实现 `updated_at = MAX(now, old+1)`：B 拿到的 updated_at 恰好等于刚建的
+    A 的 created_at（两者都是 now），列表 `ORDER BY updated_at DESC, rowid DESC`
+    于是把 A 排在 B 前面——2026-11-12 全量套件里的偶发失败就是这个。
+    现在 update 取 `MAX(now, old+1, 全表最大+1)`，与"刚改过的居顶"语义对齐。
+    """
+    frozen = 1_800_000_000  # 固定时钟：确保 create 与 update 落在同一秒
+
+    class _FrozenTime:
+        @staticmethod
+        def time() -> int:
+            return frozen
+
+    monkeypatch.setattr("muse_bridge.canvas_store.time", _FrozenTime())
+    first = store.create("第一个")
+    second = store.create("第二个")
+    store.update(first["id"], name="第一个（改过）")
+    items = store.list()
+    assert items[0]["id"] == first["id"]
+    assert items[0]["updated_at"] > items[1]["updated_at"]
+    assert items[1]["id"] == second["id"]
+
+
 def test_list_meta_has_exactly_the_contract_fields(store):
     store.create("甲")
     item = store.list()[0]

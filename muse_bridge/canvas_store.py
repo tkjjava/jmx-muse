@@ -256,8 +256,11 @@ class CanvasStore:
     ) -> dict[str, Any] | None:
         """整体覆盖 name/doc（传 None 的字段保持原值）。空间不存在返回 None。
 
-        `updated_at` 由 SQL 里的 `MAX(now, old + 1)` 计算，不是先读再写：
-        先读后写会在两个请求之间留一个窗口，窗口里的并发写会把时间戳推回去。
+        `updated_at` 取 `MAX(now, 本空间 old+1, 全表最大+1)`：前两项保证同一空间
+        每次写入严格递增，第三项保证"刚改过的空间在列表里排第一"。只靠 old+1
+        不够——同一秒内先建 A 再改 B 时，B 的 old+1 与 A 的 created_at 相等，
+        列表按 `updated_at DESC, rowid DESC` 会把刚建的 A 排在刚改的 B 前面。
+        读全表最大值与 UPDATE 在同一个锁/事务里完成，没有先读后写的窗口。
         """
         doc_json: str | None = None
         if doc is not None:
@@ -266,13 +269,16 @@ class CanvasStore:
         clean_name = normalize_name(name) if name is not None else None
         now = int(time.time())
         with self._lock:
+            top = self._conn.execute(
+                "SELECT COALESCE(MAX(updated_at), 0) FROM canvas_spaces"
+            ).fetchone()[0]
             cursor = self._conn.execute(
                 "UPDATE canvas_spaces"
                 " SET name = COALESCE(?, name),"
                 "     doc_json = COALESCE(?, doc_json),"
-                "     updated_at = MAX(?, updated_at + 1)"
+                "     updated_at = MAX(?, ?, updated_at + 1)"
                 " WHERE id = ?",
-                (clean_name, doc_json, now, space_id),
+                (clean_name, doc_json, now, int(top) + 1, space_id),
             )
             self._conn.commit()
             if cursor.rowcount == 0:

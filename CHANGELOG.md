@@ -528,6 +528,15 @@ help/未知参数不许触网）、`tests/test_tools_portability.py`（能编译
   debug 日志（只在服务端，不进响应）。
   测试见 `tests/test_silent_failure_traceability.py`（3 条）。
 
+### 修复：同一秒内"刚改过的空间"被排到后面的 flake
+
+`canvas_store.update` 过去用 `updated_at = MAX(now, old+1)`：同一秒内先建 A 再改 B
+时，B 的 updated_at 与 A 的 created_at 同为 now，列表 `ORDER BY updated_at DESC,
+rowid DESC` 把 A 排到 B 前面——全量套件里 `test_list_orders_by_updated_at_desc`
+偶发失败（2026-11-12 实测 1 failed / 1637 passed，单独跑必过，属顺序 flake）。
+现在 update 取 `MAX(now, old+1, 全表最大+1)`（读最大值与 UPDATE 同一把锁内完成），
+并新增固定时钟回归测试钉住"刚改过的空间必须居顶"。全量：**1639 passed**。
+
 ## [0.4.1] - 2026-11-11（真机活网轮，未发布）
 
 - **聊天媒体交付（离线验证）**：协议聊天中的媒体引用不再静默丢弃；通过既有
