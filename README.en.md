@@ -26,34 +26,38 @@ Expose muse.ai (Meta "Hatch") as a standard OpenAI-compatible API.
 **This project contains no signup capability.** Sessions are used from a Chrome profile
 you log into yourself.
 
-> ⚠️ This project **requires** a running, logged-in Chrome.
-> muse's transport is an encrypted Noise WebSocket with no public protocol-only implementation.
+> ⚠️ A logged-in Chrome profile or imported cookies are required once (for session
+> renewal and for the quota panel). Chat and image generation themselves now run over
+> the pure Noise protocol — see below.
 
 ```
-OpenAI client ──▶ muse-bridge  :8788/v1  ──▶ CDP-driven real Chrome ──▶ muse.ai
+OpenAI client ──▶ muse-bridge :8788/v1 ──▶ pure Noise WS ──▶ hatch.metaaivm.com
+                                      └─▶ CDP-driven Chrome ──▶ muse.ai (fallback / quota)
 ```
 
-## Why a browser is unavoidable
+## Two channels: protocol first, browser as fallback
 
 muse's chat transport is not REST and not SSE — it is an **encrypted Noise WebSocket**:
 
 ```
 wss://hatch.metaaivm.com/v1/noise
-X25519 + HKDF + AES-GCM + Ed25519
+Noise_XX_25519_AESGCM_SHA256 + inner HTTP-over-Noise (418-method allowlist)
 ```
 
-The WS URL embeds signed `auth_token` / `notary_token` values. **No public protocol-only
-implementation exists** — every community project (muse2api and others) falls back to
-browser automation, and its `http` driver still returns 501.
+The WS URL embeds signed `auth_token` / `notary_token` values. Community projects
+(muse2api and others) mostly fall back to browser automation; **this repo implements the
+protocol from scratch and validates it against the live service** (`docs/PROTOCOL.md`
+§1.6, §1.6.1):
 
-So this project takes the only viable path:
+1. cookie → `/api/session` → `/api/hatch/token` → Noise handshake;
+2. inner frames (`verb/path/headers/body/end_body`) carry HTTP semantics over `/chat/*`,
+   `/fs/*`, `/spaces/v2/*`;
+3. generation: `/chat/stream` → subscription stream `delta.presentation` →
+   `sandbox://workspace/imagine_media/…` → paged `/fs/read` → image bytes.
 
-1. Drive a real Chrome via CDP (you log into muse.ai yourself)
-2. Let the frontend perform the encryption — we never reimplement it
-3. Watch the assistant message text grow in the DOM
-4. Emit it as OpenAI SSE
-
-**This is the only workable approach today, not a shortcut.**
+The browser driver is still kept for three things: the **quota panel** (no quota REST
+exists), a **single retry fallback** when protocol generation fails with a retryable
+error, and UI behaviour the protocol does not cover yet.
 
 ## Hard boundaries
 
@@ -61,7 +65,8 @@ So this project takes the only viable path:
 - **No Cloudflare / risk-control evasion.** No fingerprint spoofing, no notary forgery,
   no challenge solving.
 - **No account sharing.** Designed for a single user managing their own accounts.
-- **No crypto reimplementation.** The Noise layer runs in the real frontend.
+- **No forged tokens.** The protocol layer only performs handshakes and frame codecs;
+  cookies/signatures still come from your own login.
 
 ## Features
 
@@ -69,6 +74,8 @@ So this project takes the only viable path:
 |---|---|
 | **OpenAI compatible** | `/v1/chat/completions` (incl. SSE streaming), `/v1/models` |
 | **CDP driven** | Reuses your logged-in Chrome; disconnects without closing it |
+| **Pure protocol chat + image generation** | Noise WS end to end, live-verified (`docs/PROTOCOL.md` §1.6/§1.6.1); browser kept as fallback |
+| **Infinite canvas** | `/canvas` zero-build UI: prompt→image cards, SQLite-backed spaces, read-only share links (`?share=`) |
 | **Centralised selectors** | A frontend change means editing `selectors.py` only |
 | **Concurrency safe** | Per-account mutex covering the whole request including streaming |
 | **Session refresh** | In-page fetch renews `hatch_vml` (48h) and wakes the VM |
@@ -263,6 +270,52 @@ Not affiliated with, endorsed by, or authorized by muse.ai or Meta. This project
 third party's service through browser automation. You are responsible for confirming and
 complying with that service's terms of use and applicable law. Provided for interoperability
 and educational purposes.
+
+## Reasoning passthrough (0.3.0+, default OFF)
+
+Set `MUSE_REASONING=1` before starting the bridge. When the page actually renders the
+model's thinking in a separate container, the bridge emits it as separate
+`delta.reasoning_content` increments; the answer still flows through `delta.content`,
+and thinking counts toward usage estimation. **When off (the default) the thinking
+container is never queried at all — output is byte-identical to a build without this
+feature.** Byte-forwarding gateways such as the relay need no changes.
+
+The container selectors ship as a candidate list (first hit wins; no hit means no
+thinking — these are guesses, not confirmed against muse's real DOM). Override with
+`MUSE_REASONING_SELECTORS` (comma-separated) when the page structure changes:
+
+```
+MUSE_REASONING_SELECTORS=[data-testid="reasoning-content"],.thinking-body
+```
+
+Non-streaming responses carry thinking too: `message.reasoning_content` appears only
+when present (OpenAI/DeepSeek semantics).
+
+---
+
+## Admin endpoint auth (0.3.7+)
+
+Mutating admin endpoints share the same `MUSE_BRIDGE_API_KEYS` as `/v1/*`:
+`/admin/attach, DELETE /admin/accounts/{account}, /admin/accounts/{account}/refresh, /admin/accounts/{account}/wake`. The read-only `/admin/accounts`, plus `/healthz` and `/console`, stay open.
+
+When `MUSE_BRIDGE_API_KEYS` is empty, `require_key` returns immediately — **default behaviour is
+byte-for-byte unchanged** and the console works out of the box. Once keys are configured,
+the console gains an "API key" field (kept in browser localStorage); without it, mutating
+admin calls answer 401 with a hint.
+
+The smoke script (`python -m muse_bridge.smoke`) honours the same key:
+with `MUSE_BRIDGE_API_KEYS` set it sends the first one, and a 401 is reported as
+a configuration hint instead of a raw traceback.
+
+A malformed numeric variable now names itself instead of raising a
+traceback; an empty value means "not set", timeouts and cooldowns must be
+greater than zero, and ports must be in 1..65535.
+
+```
+curl -X POST http://127.0.0.1:8788/admin/attach \
+  -H "Authorization: Bearer <key from MUSE_BRIDGE_API_KEYS>" \
+  -H "Content-Type: application/json" -d '{"account":"主号","cdp_url":"http://127.0.0.1:9222"}'
+```
 
 ---
 
