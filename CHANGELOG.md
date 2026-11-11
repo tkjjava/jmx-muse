@@ -149,6 +149,174 @@ LB 入口 101 升级 + Noise msg2（166 字节）+ msg3 + split 全通，而同�
 且真机 chat 两回合 200、暖池复用命中（`warm_acquire` 均 0.00023 s）、
 `protocol_driver_built: 2` 且 `protocol_fallback` 未出现。
 
+### P1-B3~B5 技术欠账清理（2026-11-11 17:0x–18:3x）
+
+上一轮把 B3–B5（上游取件活网验收、relay 字段透传、客户端显示）明确留成
+"仍未开始"。本轮逐条做完，过程中**又抓出 4 个真 bug**，全部先写失败测试再修。
+
+#### 修掉的 4 个真缺口
+
+1. **越界 Range 被 clamp 成 206（`media.parse_range`）**
+   活网验收第一项就撞上：`bytes=999999999-` 对 100 字节文件返回 **206 + 末尾
+   1 字节**，而不是 416。根因是 `if not last` 分支把起点 `min(start, size - 1)`
+   夹回末尾。播放器会把这 1 字节当成有效数据播下去，表现为"视频能加载但立刻
+   结束"——这类错误在代理链上极难定位。RFC 9110 §14.1.2 要求起点 >= 长度时
+   必须 416。
+   修法：`parse_range` 起点越界一律返回 `None`（绝不 clamp），新增
+   `is_unsatisfiable_range()` 把"该回 416"与"该忽略这个头发 200"**分开判**——
+   两者混成一个 `None` 分支时只有一个能对。`app.py` 按它回 416 +
+   `Content-Range: bytes */<size>`。
+
+2. **浏览器兜底失败变成 500（`driver._pick_muse_page`）**
+   用失效代理实测复现：CDP 连得上但 Chrome 里没有现成 muse.ai 标签页，
+   `_pick_muse_page` 就 `new_page()` + `goto(SITE)`，出口断网时 playwright 抛裸
+   `Error: Page.goto: net::ERR_CONNECTION_CLOSED`，**没人接**，一路冒到 ASGI。
+   用户拿到 `500 Internal Server Error`，而协议回退的根因早已落进日志。
+   修法：归到 `BrowserUnavailable` 并附可操作文案（先确认代理、或手动开标签页）。
+
+3. **构造期 `BrowserUnavailable` 冲出 `dispatch()`（`pool.dispatch`）**
+   `_build_driver` 在状态探测循环**之前**调用，那里的异常没有任何 except 接。
+   结果是单账号的浏览器故障升级成整个请求的 500，而不是换下一个号。
+   修法：在 `_build_driver` 外补一层 `except BrowserUnavailable`，记账号状态后
+   `continue`——与"探状态时抛"的处理保持一致。
+
+4. **`connected=False` 被误记成会话过期（`pool.dispatch`）**
+   真实 `MuseDriver.status()` 把 `connect()` 抛出的 `BrowserUnavailable`
+   **吞掉**，返回 `connected=False, logged_in=False`；而 `dispatch` 只看
+   `logged_in`，于是"浏览器连不上"被记成 `SESSION_EXPIRED`。两种状态的冷却与
+   重试语义不同，误记会让账号一直卡在"等你重新登录"上。修法：先判 `connected`，
+   记 `BROWSER_UNAVAILABLE`。
+
+前三条合起来的效果，在同一份失效代理下的实测对比：
+
+| 场景 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 协议失败 + 浏览器也失败 | `500 Internal Server Error` | `502` + `note: "浏览器连接不可用"` |
+| 账号状态 | `session_expired`（要求重新登录） | `browser_unavailable`（等网络恢复） |
+| 回退原因 | 只在内存里的 note，无日志 | 一行 WARNING（只含异常类型，无 cookie） |
+
+#### B3 上游取件活网验收
+
+先按 roadmap §B3 第 1 条"优先使用已有且仍有效的媒体路径，不额外生成"，
+用 `data/media` 里 6 份早间成品验交付链：读取 / 下载 / 哈希一致 / Range 206 /
+越界 416 / 未知 token 404 —— **6/6 通过**（第 416 项最初失败，即上表第 1 条 bug）。
+
+再做真实端到端（`tools/acceptance.py` 的 `media` 与生成路径）：
+
+| 观测项 | 实测值 |
+| --- | --- |
+| SSE `delta.media` 事件 | 1 |
+| `chat_media_stored` | `1 -> 2` |
+| 附件字段 | `token`/`url`/`mime`/`kind`/`size`/`sha256`/`filename` 齐全 |
+| 下载 | `200`，字节数与 `size` 一致 |
+| sha256 | 与响应里的 `sha256` **一致** |
+| `chat_media_fetch` 耗时 | count=2，avg 3.17 s，max 4.47 s |
+
+#### B4 relay 兼容性
+
+本机实测 **没有 relay 环境**：3000 端口是 OpenMAIC 前端（Next.js），
+且无 one-api / new-api / litellm / gateway 在跑。按 roadmap §B4 自己的规则
+（"暂时没有 relay 环境 → 保留未验收，不虚构兼容结论"），**下游透传仍记为未验收**。
+
+能证明的是上游一半——bridge 自己没在序列化时丢字段：
+
+| 检查项 | 结果 |
+| --- | --- |
+| 非流式 `message.media` 字段齐全 | ✓ |
+| 流式 `delta.media` 字段齐全 | ✓ |
+| 两者字段集完全相同 | ✓ |
+| 两处 url 均可下载且 sha256 一致 | ✓ |
+
+这四条是 relay 透传的**必要前提**，不是透传本身的证据。
+
+#### B5 客户端显示与下载
+
+端点侧 6/6：同源代理 `/canvas/api/media/<token>` 不带 Authorization 可读
+（`<img>` 发不了自定义头，这是它存在的理由）、代理返回真实
+`Content-Type: image/webp`、直连下载面是 `octet-stream` + `nosniff` +
+`attachment`、Range 经代理可用、错误/非法 token 均 404 而非 500。
+
+真实浏览器渲染：新开标签页（**不动产品正在用的 muse.ai 页**，用完即关）把
+同源代理 URL 塞进 `<img>`，读 `naturalWidth` —— **ok=True, 1600×1600**。
+
+#### P2-C 两个计数的"真实生效"验证
+
+上一轮这两项是"未验证"：`media_sweep_removed` 从没见它涨过，
+`protocol_fallback` 计数为 0 是因为没发生过回退。
+
+- **`media_sweep_removed`**：在临时目录造 1 个新鲜成品 + 1 个超龄成品 +
+  1 个超龄 `.part`，跑真 `sweep_forever(0.2)` → `runs +4`、`removed +2`，
+  超龄两者消失、新鲜成品保留。**5/5**。
+- **`protocol_fallback`**：把 `MUSE_PROTOCOL_PROXY` 指到从未监听的
+  `127.0.0.1:9`，协议驱动必然 ConnectError → 计数 `0 -> 1`，
+  回退原因落一行 WARNING，日志无凭据泄漏。**3/3**。
+  （这条同时把上面第 2~4 个 bug 暴露出来。）
+
+#### 流式 SSE 活网回归
+
+| 检查项 | 实测 |
+| --- | --- |
+| 帧数 / 坏帧 | 6 / 0 |
+| `finish_reason` | 恰好一个，`stop`，且是最后一帧 |
+| `[DONE]` | 收到 |
+| 正文在 finish 之前结束 | ✓（最后正文帧 2，finish 帧 3） |
+| 流式 vs 非流式正文 | 42 字 vs 42 字，**比值 1.00** |
+
+11/11 通过。
+
+#### 协议生成真机验收
+
+`protocol_generation.py` 此前是唯一没有活网验收的模块。用
+`/v1/images/tasks` 异步提交 → 轮询 → 下载：
+
+| 检查项 | 实测 |
+| --- | --- |
+| 状态推进 | `queued -> processing -> completed(100)` |
+| `media_token` | 非空 |
+| 下载 | `200`，嗅探为 `webp` |
+| 驱动 | `protocol_driver_built +1`，`browser_driver_built +0`，`protocol_fallback +0` |
+
+6/6 通过，三次连跑成功；另有一次因上游 `/api/session` ReadTimeout 失败，
+那次恰好把生成阶段的回退路径也真实走了一遍（`protocol_fallback +1`）。
+**偶发上游抖动，不是代码回归。**
+
+顺带补了一处契约缺口：任务响应原先只有 `media_token` 与 `url`，客户端不知道
+成品是图还是视频、多大。`_job_response` 现在对已完成任务补 `mime`/`size`/`kind`
+（走 `MediaStore.ref()` 的 32 字节文件头嗅探，代价可忽略）。
+**刻意不在轮询里算 `sha256`**：那要整读文件，视频会被读成几十上百次；
+完整性校验留在下载侧。
+
+#### 探针脱敏并并入 `tools/`
+
+原 `work/` 里的验收脚本有两个问题：Fernet key 硬编码在源码里、绝对路径写死，
+别人拿到跑不起来。现在 `tools/` 下是可复现的一套：
+
+| 新增 | 作用 |
+| --- | --- |
+| `tools/bridge_ops.py` | 自检/健康/观测/读日志 |
+| `tools/restart_bridge.py` | 重启并等就绪 |
+| `tools/refresh_account.py` | 刷账号探针 |
+| `tools/acceptance.py` | 成品链路、流式、清扫、协议生成 |
+| `tools/README.md` | 用法、env 约定、踩坑记录 |
+
+凭据一律从环境变量读，缺失时**明确报错**而不是给默认值——给默认值等于把密钥
+再写一遍。`MediaStore` 的默认根按 cwd 解析这个坑也写进了 README（从仓库外跑
+会让它指向别处、甚至 `mkdir` 出空目录，表现是"成品凭空消失"）。
+
+#### 本轮基线
+
+- `ruff check muse_bridge tests tools` → All checks passed
+- `pytest -q` → **1572 passed / 0 failed**（本轮新增 24 条）
+- `python tools/acceptance.py` → **21/21 通过**（media 6 + stream 10 + sweep 5）
+- `python tools/acceptance.py generation` → **6/6 通过**
+
+**仍未完成的部分（如实列出，不冒充完成）：**
+
+- B4 下游 relay 透传：本机无 relay 环境，按 §B4 规则保留"未验收"
+- B5 真实客户端（浏览器之外的 GUI/移动端）：只验了端点行为与 Chrome 渲染
+- 视频链路端到端：`--video` 分支已写好但未跑（图片链路稳定后再单独安排，
+  与 §B3 第 3 条一致）
+
 ## [0.4.1] - 2026-11-11（真机活网轮，未发布）
 
 - **聊天媒体交付（离线验证）**：协议聊天中的媒体引用不再静默丢弃；通过既有
