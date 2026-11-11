@@ -245,9 +245,29 @@ token 对照：直连桥 `200` / 392122 字节，经网关 `404`。表现是"字
 - 鉴权与聊天同源，**不记 token 用量**（下载不是推理，计 0 只会在报表里添噪）。
 
 修复后实测：`200` 且 sha256 一致、`HEAD` 200 空体、`Range: bytes=0-1023` → `206`、
-越界 → `416`、坏 token → `404`、无 key → `401`。relay 全量
-`344 passed / 7 skipped`（另 1 条既有用例在本机静默崩溃，已用**原始未修改包**
-复现，判定为环境侧既有问题，非本次引入）。
+越界 → `416`、坏 token → `404`、无 key → `401`。
+
+**当时的一个错误结论（已纠正）**：这轮 relay 全量测试里有 1 条
+（`test_v18.py::test_metrics_merge_across_workers`）会把整条命令静默带走、无输出
+退出。我先用"原始未修改包同样复现"排除了"本次改动引入"，然后**推测**是本地安全
+软件对"拉起 `sleep 60` 子进程再立即 kill"这类形态敏感，把结论写成了"环境侧既有
+问题"。这个推测是错的。
+
+继续追下去才定位到真因，而且它就在 relay 自己的代码里：`_pid_alive()` 用
+`os.kill(pid, 0)` 判断进程存活，而 **Windows 上这等价于 `TerminateProcess`**——
+实测对一个正睡着的子进程调用后，它当场消失（`poll()` 变 `0xC0000142`，`tasklist`
+查不到），函数却正常返回。`/metrics` 的合并循环会对每个 `worker-*.json` 的 pid
+调一次它，所以在设了 `RELAY_METRICS_DIR` 的多 worker 部署里，**每抓一次指标就杀掉
+一个 worker**，`muse_relay_metrics_workers` 永远只可能为 1。反证也清楚：事件日志
+里没有任何 `Application Error`、WER 或 Defender 检出记录，不是崩溃，是被自己人
+终止的。
+
+已在 relay 侧修掉（V1.13.1：Windows 改用 `OpenProcess` + `WaitForSingleObject`
+只等待不发信号，POSIX 保留原实现），并新增
+`test_pid_alive_never_terminates_the_probe_target` 钉住。修后 relay 全量
+**`346 passed / 7 skipped`，不再需要 `--deselect`**。
+教训记在这里：把"复现了"当成"定性了"是偷懒——原始包复现只能证明"不是我改坏的"，
+不能证明"不是代码的问题"。
 
 **同时补掉 bridge 侧一个缺口（第 6 个 bug）**：`/v1/media` 只挂了 `GET`，
 `HEAD` 返回 **405**。播放器、CDN 回源、下载管理器普遍先发 HEAD 探
