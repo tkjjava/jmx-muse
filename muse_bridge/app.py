@@ -1216,9 +1216,11 @@ async def videos_create(
     return _submit_task("video", request, x_account=x_account)
 
 
+@app.head("/v1/media/{token}")
 @app.get("/v1/media/{token}")
 async def media_download(
     token: str,
+    request: Request,
     range_header: str | None = Header(default=None, alias="range"),
     _: None = Depends(require_key),
 ):
@@ -1226,12 +1228,25 @@ async def media_download(
 
     形状判定、Range 解析、响应头全部交给 media.py（那里是唯一事实来源），
     这里只做 HTTP 映射：非法 token 与不存在都是同一句 404，不给探测信号。
+
+    **HEAD 必须支持**：播放器、CDN 回源、下载管理器普遍先发 HEAD 探测
+    `Content-Length` / `Accept-Ranges` 再决定要不要续传。只挂 GET 会让它们
+    拿到 405 然后放弃——成品明明在，客户端却播不了。HEAD 只回头不回体，
+    而且**不读文件内容**（长度来自元数据），所以对几十 MB 的视频也是零成本。
     """
+    head_only = request.method == "HEAD"
     ms = media.MediaStore()
     try:
         ref = ms.ref(token)
     except media.MediaError as exc:
         observability.bump("media_download_failed")
+        if head_only:
+            # HEAD 也要如实回状态码：探测方靠它判断"这份成品还在不在"。
+            return Response(
+                content=b"",
+                status_code=exc.status_code,
+                headers={"Content-Type": "application/json"},
+            )
         return _error(exc.status_code, str(exc), "not_found" if exc.status_code == 404 else "media_error")
 
     headers = media.serve_headers(size=ref.size, filename=ref.filename, mime=ref.mime)
@@ -1251,6 +1266,15 @@ async def media_download(
             headers=headers,
             media_type="application/octet-stream",
         )
+    if head_only:
+        # 只回头：206 的 Content-Range/Content-Length 用区间算出来的值，
+        # 与 GET 保持一致，否则探测方看到的长度和实测长度会对不上。
+        if span is not None:
+            first, last = span
+            headers["Content-Range"] = f"bytes {first}-{last}/{ref.size}"
+            headers["Content-Length"] = str(last - first + 1)
+            return Response(content=b"", status_code=206, headers=headers)
+        return Response(content=b"", status_code=200, headers=headers)
     try:
         with observability.timed("media_download"):
             if span is None:
