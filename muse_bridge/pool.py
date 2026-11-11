@@ -153,12 +153,37 @@ def _build_driver(
       * `"generation-browser"`：**强制浏览器**，仅供 `generate_media` 在协议生成
         失败后回退一次使用。给它单独的取值而不是布尔参数，是为了让"这次为什么
         没走协议"在调用栈里一眼可见。
+
+    **三种"没走协议"的原因分开计数**（2026-11-11 补）：过去只记
+    `browser_driver_built`，运维看到这个数涨了也不知道是"开关没开"还是"账号没
+    导 cookie"——而这两者的处理办法完全不同。现在：
+
+      * `protocol_disabled`：`MUSE_PROTOCOL_DRIVER=0`（默认），整台机器都没走协议；
+      * `protocol_no_cookies`：开关开了但这个账号没有 cookie（导入后再刷新即可）；
+      * `browser_driver_forced`：协议生成失败后的**主动**回退，不是缺陷。
+
+    计数放在这里而不是 `dispatch()`：这里是唯一知道原因的地方，放两处会重复计数。
     """
-    if capability in ("chat", "generation") and _protocol_driver_enabled():
-        cookies = store.cookies(record.account)
-        if cookies:
-            proxy = os.environ.get("MUSE_PROTOCOL_PROXY", "").strip() or None
-            return ProtocolDriver(record.account, cookies, proxy=proxy)
+    wants_protocol = capability in ("chat", "generation")
+    if wants_protocol:
+        if not _protocol_driver_enabled():
+            observability.bump("protocol_disabled")
+        else:
+            cookies = store.cookies(record.account)
+            if cookies:
+                proxy = os.environ.get("MUSE_PROTOCOL_PROXY", "").strip() or None
+                observability.bump("protocol_driver_built")
+                return ProtocolDriver(record.account, cookies, proxy=proxy)
+            observability.bump("protocol_no_cookies")
+            logger.debug(
+                "账号 %s 没有导入 cookie：协议路径不可用，本次走浏览器（先 POST "
+                "/admin/accounts/%s/cookies 再 refresh 可修）",
+                record.account,
+                record.account,
+            )
+        observability.bump("browser_driver_built")
+    elif capability == "generation-browser":
+        observability.bump("browser_driver_forced")
     return MuseDriver(record.cdp_url)
 
 
@@ -256,12 +281,9 @@ async def dispatch(
                     error=str(exc),
                 )
                 continue
-            if isinstance(driver, ProtocolDriver):
-                observability.bump("protocol_driver_built")
-            elif capability == "chat":
-                # 聊天却拿到浏览器驱动：要么没开协议开关，要么该账号没有 cookie。
-                # 这两种都会让"协议优先"静默失效，必须能计数，否则只能靠读代码猜。
-                observability.bump("browser_driver_built")
+            # 驱动选择的计数（protocol_driver_built / browser_driver_built /
+            # protocol_disabled / protocol_no_cookies / browser_driver_forced）
+            # 一律由 `_build_driver` 完成：那里是唯一知道"为什么选了它"的地方。
             # 探一次驱动状态。协议驱动连不上（`ProtocolError`，只可能来自协议驱动）
             # 时**回退浏览器**：先把协议连接关干净再建浏览器驱动（漏关会留下一条
             # 没人收的 Noise 连接），然后重探一次。重探在同一个循环里，所以它失败

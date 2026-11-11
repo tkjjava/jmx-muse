@@ -1029,7 +1029,14 @@ def _references_of(
                  *(request.audios or []), *(request.files or [])]
     if messages:
         refs_list.extend(_collect_references(messages))
-    return refs_list[:env.REFERENCE_MAX]
+    limit = env.REFERENCE_MAX
+    if len(refs_list) > limit:
+        # 超上限一律只取前 `limit` 个——这是既有契约（改了会让老调用方行为突变），
+        # 但不再"无声无息"：以前调用方传 12 个只收到 10 个的功能、日志里一个字都
+        # 没有，排障时只能靠读代码猜。现在至少计数可在 `/admin/observability` 看到
+        # `references_truncated`（`refs.py` 那条 400 是另一套上限，见发布候选 §3.3）。
+        observability.bump("references_truncated")
+    return refs_list[:limit]
 
 
 async def _run_generation(

@@ -372,7 +372,7 @@ token 对照：直连桥 `200` / 392122 字节，经网关 `404`。表现是"字
 #### 本轮基线
 
 - `ruff check muse_bridge tests tools` → All checks passed（C3 后复跑仍全绿）
-- `pytest -q` → **1620 passed / 0 failed**（P1-B3~B5 轮是 1572，C3 加了 48 条钉子）
+- `pytest -q` → **1630 passed / 0 failed**（P1-B3~B5 轮是 1572，C3 加了 58 条钉子）
 - `python tools/acceptance.py` → **21/21 通过**（media 6 + stream 10 + sweep 5）
 - `python tools/acceptance.py generation` → **6/6 通过**
 
@@ -483,8 +483,39 @@ C3 的结论原先只活在这一份文档里——换台机器、换个人就�
 help/未知参数不许触网）、`tests/test_tools_portability.py`（能编译、README 登记、
 无本机绝对路径常量、有 main 守卫）。
 
-**最终基线**：`pytest -q` → **1620 passed**、ruff 全绿；重启后
+**最终基线**：`pytest -q` → **1630 passed**、ruff 全绿；重启后
 `acceptance.py stream` **10/10**、`sweep` **5/5**；成品目录 24 个 / 25404473 B 不变。
+
+### 可观测性补强：驱动选择三态、参考素材截断（2026-11-11 21:5x）
+
+**问题**：两处"静默行为"让排障只能读代码猜。
+
+- `_build_driver` 没走协议时只记一个 `browser_driver_built`，而且只在聊天路径
+  计。运维看到这个数涨了，分不清是"整台机器没开开关"还是"这个号没导 cookie"；
+  更看不到协议生成失败后的主动回退（那种情况不是缺陷，记进 fallback 会误报）。
+- `app._references_of` 超 `MUSE_REFERENCE_MAX`（默认 10）时**静默截断**：调用方
+  传 12 个素材、只收到 10 个的功能，日志与计数里一个痕迹都没有。
+
+**改动**：
+
+- `pool._build_driver` 把计数收进**决策点**（唯一知道"为什么选了它"的地方），
+  拆成三态：`protocol_disabled`（开关关）、`protocol_no_cookies`（开关开但该号
+  没 cookie）、`browser_driver_forced`（协议生成失败后的主动回退）；
+  `dispatch()` 里原来的两处 bump 删除，避免两处各自计数。
+- `protocol_no_cookies` 配一条 debug 日志，直接写出补救动作（导 cookie 再 refresh）。
+- `app._references_of` 新增 `references_truncated` 计数；**截断契约不变**
+  （改成报错属于对外行为变更，见发布候选 §8）。
+- 并发路径也覆盖到了：`capability="generation"` 过去不计 `browser_driver_built`，
+  现在是瞎区，已补上。
+
+**实测**：重启加载新代码 → 发一句 → `/admin/observability` 出现
+`{"browser_driver_built": 1, "protocol_no_cookies": 1}`，与真机事实吻合——该账号
+没有导入 cookie，而开关是 `restart_bridge.py` 启动时打开的。聊天本身 200。
+
+**测试**：新增 `tests/test_driver_selection_observability.py`（7 条：三态各只涨
+自己的计数、生成路径同样计数、强制回退不算误报、开关每次现读）与
+`tests/test_references_truncation_observability.py`（3 条：未超不计数、超限保序
+截断且 +1、上限来自配置而非写死）。
 
 ## [0.4.1] - 2026-11-11（真机活网轮，未发布）
 

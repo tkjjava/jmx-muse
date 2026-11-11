@@ -6,7 +6,7 @@
 
 ## 结论（先给答案）
 
-- **代码侧可以进入发布候选**：测试基线可信（`1620 passed` / `ruff` 全绿），
+- **代码侧可以进入发布候选**：测试基线可信（`1630 passed` / `ruff` 全绿），
   启停恢复有实测记录，媒体交付验收通过，P0 生命周期不变量有专项用例。
 - **有两处缺口，不冒充通过**：
   1. relay 侧"媒体经下游透传"本轮**未触发**（上游对纯文本提示没回附件）；
@@ -124,9 +124,11 @@
    与 Chrome 渲染，没有真机客户端证据。
 2. **relay 侧媒体透传本轮未触发**：上游对纯文本提示没有回附件，`tools/accept_relay_media.py`
    的结果是"3/3 通过、2 项未触发"。"未触发"不等于通过。
-3. **参考素材有两个上限**：`MUSE_REFERENCE_MAX`（app 层，超出**静默截断**）与
+3. **参考素材有两个上限**：`MUSE_REFERENCE_MAX`（app 层，超出**截断**到前 N 个）与
    `MUSE_MAX_REFERENCE_FILES`（refs 层，超出**报 400**）。默认都是 10，所以
    "传 12 个"会先被截断成 10、400 那条分支基本走不到。要统一得先定契约（§8）。
+   截断本身仍是既有契约（改了会让老调用方行为突变），但**不再无声无息**：
+   现在会计数 `references_truncated`，在 `/admin/observability` 可见。
 4. **单账号吞吐**：一个账号同一时刻只允许一个请求（同一浏览器窗口的 DOM 会
    互相污染），所以并发度实际等于账号数。
 5. **上游 DOM 改版会让浏览器驱动失效**：所有选择器集中在 `muse_bridge/selectors.py`，
@@ -196,12 +198,13 @@ python tools\restart_bridge.py --log 'D:\deep seek\work\bridge.log'
 
 | 验收项 | 命令 | 结果 |
 | --- | --- | --- |
-| bridge 全量测试 | `python -m pytest -q` | **1620 passed**（23.29 s） |
+| bridge 全量测试 | `python -m pytest -q` | **1630 passed**（21.62 s） |
 | bridge 静态检查 | `python -m ruff check muse_bridge tests tools` | All checks passed |
 | bridge 成品链路 | `python tools\acceptance.py media` | **6/6**（407142 B，octet-stream，206，416，404） |
 | bridge 流式 | `python tools\acceptance.py stream` | **10/10**（含"非流式同样成功 200"） |
 | bridge 清扫 | `python tools\acceptance.py sweep` | **5/5** |
 | 启停恢复（工具化） | `python tools\lifecycle_check.py verify --chat` | **恢复通过**：账号 1→1、媒体/库不变、聊天 200 |
+| 驱动选择三态计数 | 重启后发一句，查 `GET /admin/observability` | `browser_driver_built=1, protocol_no_cookies=1`（与该号没导 cookie 的事实吻合） |
 | 文档断言审计 | `python tools\doc_assertions.py` | **失效 0 条**；10 条仓库内引用可解析、377 条上游引用只统计 |
 | relay 媒体透传 | `python tools\accept_relay_media.py --relay … --model muse-1` | **3/3 通过，2 项未触发** |
 | relay 健康 | `GET http://127.0.0.1:8765/healthz` | 200 `{"status":"ok","version":"1.13.1"}` |
@@ -222,7 +225,7 @@ python tools\restart_bridge.py --log 'D:\deep seek\work\bridge.log'
 
 | 门槛 | 状态 | 依据 |
 | --- | --- | --- |
-| 可信的测试基线 | ✅ | 1620 passed / ruff 全绿；relay 346 passed / 7 skipped |
+| 可信的测试基线 | ✅ | 1630 passed / ruff 全绿；relay 346 passed / 7 skipped |
 | P0 生命周期不变量有专项用例 | ✅ | 暖池租用归属、并发拒绝、失败清理等用例在 `tests/` 内 |
 | ≥1 条明确记录的媒体交付验收 | ✅ | bridge media 6/6（含 HEAD/206/416/404） |
 | relay / 客户端覆盖说明 | ⚠ 部分 | relay 媒体项"未触发"；非 Chrome 客户端未测（§3.4） |
