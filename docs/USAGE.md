@@ -6,6 +6,35 @@ muse-bridge 的前提是**一个运行中且已登录 muse.ai 的 Chrome**。按
 
 ---
 
+## 聊天中的图片与视频附件
+
+协议聊天返回媒体时，bridge 会取回并保存成品，继续返回普通文本；附件放在扩展字段
+`choices[0].message.media`（非流式）或 `choices[0].delta.media`（SSE）。
+流式客户端应把各帧中的 `media` 数组合并。纯文本回复不增加这个字段。
+
+```json
+{
+  "role": "assistant",
+  "content": "生成结果",
+  "media": [
+    {
+      "url": "/v1/media/<token>",
+      "mime": "image/png",
+      "kind": "image",
+      "size": 12345
+    }
+  ]
+}
+```
+
+下载附件时继续发送 `Authorization: Bearer <bridge-key>`；`token` 本身不代替鉴权。
+`MUSE_PUBLIC_BASE` 已设置时 URL 带该前缀，否则客户端以 bridge 地址解析相对路径。
+普通 Markdown 图片标签通常无法附加 Bearer 头，客户端应先鉴权下载，再按
+`media[].mime` 创建 blob URL 展示；下载端点统一返回 `application/octet-stream`
+和 `X-Content-Type-Options: nosniff`，不要依赖下载响应的 Content-Type 推断图片类型。
+外部 relay 需要保留 `media` 扩展字段；本轮只验证 bridge 的离线接口与实际文件保存，
+未验证特定 relay 或新一次上游媒体生成。浏览器驱动仍维持已有文本提取行为。
+
 ## 一、准备
 
 ### 1.1 安装
@@ -362,7 +391,134 @@ export MUSE_QUIET_MS=1200   # 更保守，但收尾更慢
 
 ---
 
-## 十、安全提示
+## 十、生成端点与纯协议路径（0.4.0）
+
+### 10.1 图像 / 视频生成
+
+| 端点 | 行为 |
+|---|---|
+| `POST /v1/images/generations` | 默认同步；`async_mode=true` 时立即回任务 |
+| `POST /v1/images/edits` | OpenAI 编辑端点的 **JSON 变体**（`images` 至少 1 张） |
+| `POST /v1/images/tasks` | 入队，立即回 task_id（可带 `Idempotency-Key`） |
+| `POST /v1/videos`、`POST /v1/videos/generations` | **总是异步**：上游 600 秒的生成不可能挂在 HTTP 里等 |
+| `GET /v1/images/tasks/{id}`、`/v1/videos/{id}` | 轮询任务 |
+| `GET /v1/media/{token}` | 成品下载（**必须带 key**，支持 Range） |
+| `DELETE /v1/media/{token}` | 删除一份成品（同一把 key） |
+
+```bash
+curl -X POST http://127.0.0.1:8788/v1/images/generations \
+  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"prompt":"雨夜霓虹街道，电影感","size":"16:9"}'
+
+# 参考图（data URL / http(s) / 服务端路径都行）
+curl -X POST http://127.0.0.1:8788/v1/images/edits \
+  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"prompt":"把天空换成黄昏","images":["refer.png"]}'
+```
+
+**multipart 不支持**：`/v1/images/edits` 只收 JSON。用 multipart 会拿到一条
+点名原因的 400（不是 422），因为本服务没装 `python-multipart`，也不为这一个
+端点多一个运行时依赖。
+
+### 10.2 fal.ai 队列兼容
+
+给 fal 客户端用的薄壳（提交 → 轮询 → 取结果）：
+
+| 端点 | 行为 |
+|---|---|
+| `GET /v1/fal/models` | 两个模型：`muse-image` / `muse-video` |
+| `POST /v1/fal/muse/image`、`POST /v1/fal/muse/video` | 回 `request_id` + `status=IN_QUEUE` |
+| `GET /v1/fal/muse/requests/{id}/status` | `IN_QUEUE` / `IN_PROGRESS` / `COMPLETED` / `ERROR` |
+| `GET /v1/fal/muse/requests/{id}` | 没跑完回 **202**；跑完回 `images` 或 `video` |
+
+`duration` / `aspect_ratio` / `seed` 会编进提示词文本——已证实的生成载荷里
+没有这些结构化字段（见 `docs/PROTOCOL.md` 第九章）。
+
+### 10.3 运维端点
+
+| 端点 | 行为 |
+|---|---|
+| `GET /admin/tasks`、`GET /admin/tasks/{id}` | 任务清单/单条（默认不外发账号标签） |
+| `POST /admin/tasks/clear?keep=N` | 只清**终态**任务，`keep` 保留最新 N 条已结束任务 |
+| `GET /admin/accounts/{a}/quota` | 读额度面板（**必须浏览器**：muse.ai 没有额度 REST 接口） |
+| `POST /admin/accounts/{a}/keepalive` | 续期 + 唤醒一次跑完，返回值带 `via` |
+| `POST /admin/accounts/{a}/cookies` | 导入 cookie（纯协议路径凭据），只回 cookie 名字 |
+| `GET /admin/observability` | 分阶段计数与耗时（见 10.5） |
+
+### 10.5 可观测性与媒体清理
+
+`GET /healthz` 的 `warm_pool` 只放**池内状态**（`enabled` / `accounts` / `refs` /
+`leased_accounts`），不放失败率——匿名探针不该看到内部错误分布。
+
+要看"到底卡在哪一段"，用管理面：
+
+```bash
+curl -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8788/admin/observability
+```
+
+```json
+{
+  "counters": {
+    "protocol_driver_built": 12,
+    "browser_driver_built": 0,
+    "protocol_fallback": 1,
+    "chat_media_fetch_failed": 0,
+    "media_sweep_runs": 3,
+    "media_sweep_removed": 41
+  },
+  "timing": {
+    "count": { "warm_acquire": 12, "chat_media_fetch": 4 },
+    "average_seconds": { "warm_acquire": 0.0003, "chat_media_fetch": 1.82 },
+    "max_seconds": { "warm_acquire": 0.004, "chat_media_fetch": 3.1 }
+  }
+}
+```
+
+几个字段的实际用途：
+
+- `browser_driver_built` 在**聊天**路径上大于 0：说明"协议优先"静默失效了——要么
+  `MUSE_PROTOCOL_DRIVER` 没开，要么该账号没导入 cookie。这是最容易悄悄退化的地方。
+- `protocol_fallback` 大于 0：协议 WS 失败并回退过浏览器。回退原因同时会打一条
+  WARNING 日志（只含异常类型与消息，不含 cookie）。
+- `media_sweep_runs` 与 `media_sweep_removed` 分开看：前者证明后台清理**活着**，
+  后者是实际回收量。只有后者的话，"没删东西"和"没在跑"分不清。
+
+**媒体清理**：`data/media/` 下的成品按 `MUSE_MEDIA_TTL`（默认 172800 秒 = 2 天）
+过期，后台每小时清一次（`MUSE_MEDIA_SWEEP_INTERVAL`，默认 3600 秒）。清理只删
+token 形态的文件和崩溃残留的 `.part`，不会碰目录里其他东西；单文件上限是
+`MUSE_MAX_MEDIA_BYTES`（默认 256 MiB）。
+
+### 10.4 纯协议路径：现在到哪一步了
+
+这是本版的主体，也是**最容易被过度宣称**的部分。准确的现状：
+
+1. **协议层已完成并有离线测试**：`noise.py`（Noise_XX 握手）、`proto.py`
+   （手写 protobuf wire）、`protocol_client.py`（三阶段 bootstrap +
+   HTTP-over-Noise + NDJSON 流 + `/fs/*` 分块读写）、`protocol_engine.py` /
+   `protocol_generation.py`（生成编排）。本仓库**从未连接真实 muse.ai**：
+   结论全部标了验证等级，没证实的能力显式抛 `UNVERIFIED`，不假装能跑。
+2. **实际生成仍然走浏览器**。账号库里的默认凭据是「Chrome profile + CDP
+   端点」，纯协议生成尚未接进 `pool.generate_media`——接进去需要真机对拍
+   （尤其成品回传路径与配额扣减时点），没有账号时接进去就是拿用户当试验品。
+3. **已经能无浏览器做的一件事**：导入 cookie 后，`keepalive` 走纯 HTTP
+   （`session_http.renew_session` + `wake_vm`），完全不启动 Chrome：
+
+```bash
+# 从浏览器开发者工具复制 hatch_sess / hatch_vml 等 cookie（值不要外传）
+curl -X POST http://127.0.0.1:8788/admin/accounts/muse-main/cookies \
+  -H "Authorization: Bearer $KEY" -H 'content-type: application/json' \
+  -d '{"cookies":{"hatch_sess":"...","hatch_vml":"..."}}'
+
+curl -X POST http://127.0.0.1:8788/admin/accounts/muse-main/keepalive \
+  -H "Authorization: Bearer $KEY"
+# → {"via":"http","refreshed":true,"woken":true,...}
+```
+
+cookie 落库走 `MUSE_BRIDGE_KEY` 加密列；响应只回 cookie 名字，不回值。
+
+---
+
+## 十一、安全提示
 
 1. **Chrome 的调试端口不要暴露到公网**。`--remote-debugging-port` 等于把浏览器完全开放。
    确认它只监听 `127.0.0.1`（默认如此）。
