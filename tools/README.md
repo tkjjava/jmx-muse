@@ -25,6 +25,7 @@ kwargs，才证明代理真的用上了。
 | `bridge_ops.py` | 自检、健康、观测快照、读日志尾部 | 否 |
 | `restart_bridge.py` | 杀掉占端口的旧进程、用当前环境起新的、等就绪 | 否 |
 | `refresh_account.py` | 刷账号探针，让 `accounts_dispatchable` 回到 1 | 否 |
+| `protocol_flow.py` | 协议一条龙：抓已登录 Chrome 的 cookie → 导入桥 → 纯 HTTP 续期 → 验证 `chat_driver=protocol`；`--verify-chat` 额外跑一次最小聊天 | `--verify-chat` 会（极小） |
 | `acceptance.py` | 成品链路、流式 SSE、清扫计数、（可选）协议生成 | `generation` 会 |
 | `accept_video.py` | 视频端到端：任务轮询、`ftyp` 魔数、Range 分段、时长 | 会 |
 | `accept_relay_media.py` | 经 relay 验媒体字段透传 + **按客户端方式取件** | 会 |

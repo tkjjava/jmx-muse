@@ -61,3 +61,22 @@ def test_accept_relay_help_prints_usage_and_exits(accept_relay, capsys) -> None:
 def test_accept_relay_rejects_unknown_flag(accept_relay, capsys) -> None:
     assert accept_relay.main(["--nope"]) == 2
     assert "不认识的参数" in capsys.readouterr().err
+
+@pytest.fixture(scope="module")
+def protocol_flow():
+    return _load("protocol_flow.py")
+
+
+def test_protocol_flow_help_prints_usage_and_exits(protocol_flow, capsys) -> None:
+    assert protocol_flow.main(["--help"]) == 0
+    assert "用法" in capsys.readouterr().out
+
+
+def test_protocol_flow_rejects_unknown_flag_before_touching_the_browser(
+    protocol_flow, capsys
+) -> None:
+    """未知参数必须在连 Chrome / 发请求之前就返回 2（否则会像旧工具那样跑起真业务）。"""
+    assert protocol_flow.main(["--nope"]) == 2
+    captured = capsys.readouterr()
+    assert "不认识的参数" in captured.err
+
