@@ -980,9 +980,26 @@ def _job_response(job: jobs.Job) -> dict:
     # 用 `job.state` 做读侧归一，而不是 `payload["state"]`——`Job.to_dict()` 的
     # 键叫 status，取 "state" 永远是 None，会把每条任务的对外状态都写成 unknown。
     payload["status"] = _normalize_state(job.state)
-    if payload.get("media_token"):
-        payload["url"] = _absolute(f"/v1/media/{payload['media_token']}")
+    token = str(payload.get("media_token") or "")
+    if token:
+        payload["url"] = _absolute(f"/v1/media/{token}")
         payload["result"] = {"url": payload["url"]}
+        # 补 mime/size/kind（2026-11-11 补）。之前任务响应只有 token 和 url：
+        # 客户端不知道成品是图还是视频、多大，要显示预览就得先下载一遍再说，
+        # 视频尤其浪费。`ref()` 只读文件头 32 字节，代价可以忽略。
+        #
+        # 刻意**不**在这里算 sha256：那要整读文件，而轮询会重复调用本函数，
+        # 视频大文件会被读成几十上百次。完整性校验留在下载侧做。
+        if payload["status"] == "completed":
+            try:
+                ref = media.MediaStore().ref(token)
+            except media.MediaError:
+                # 文件已被清理（TTL）或不存在：不带元数据，不要因为补字段而报错。
+                pass
+            else:
+                payload["mime"] = ref.mime
+                payload["size"] = ref.size
+                payload["kind"] = ref.kind
     return payload
 
 

@@ -323,6 +323,56 @@ async def test_admin_tasks_list_and_queued_count(api, store):
 
 
 @pytest.mark.asyncio
+async def test_completed_task_carries_media_metadata(api, store, monkeypatch, tmp_path):
+    """完成任务必须带 mime/size/kind，否则客户端不知道成品是图还是视频。
+
+    为什么单钉这条：任务响应此前只有 `media_token` 和 `url`。客户端要显示预览、
+    要按类型选 `<img>` 还是 `<video>`、要判断下载是否完整，都只能先把文件下完
+    再说——视频尤其浪费。补的是 `media.MediaStore.ref()` 那 32 字节的文件头嗅探。
+    """
+    media_root = tmp_path / "media_meta"
+    # 为什么不能只设 `MUSE_MEDIA_DIR`：`MediaStore.__init__(root=DEFAULT_MEDIA_DIR)`
+    # 的默认值在**函数定义时**就已求值，`DEFAULT_MEDIA_DIR` 又在 import 时读环境，
+    # 所以测试里改环境变量对 `MediaStore()` 没有任何影响。必须换掉构造本身。
+    real_store_cls = media.MediaStore
+    monkeypatch.setattr(app_module.media, "MediaStore", lambda: real_store_cls(media_root))
+
+    png = b"\x89PNG\r\n\x1a\n" + b"p" * 200
+    ref = real_store_cls(media_root).save(png, "image/png")
+
+    job = _task_row(store, state=jobs.JobStatus.COMPLETED.value, token=ref.token)
+    response = await api.get(f"/admin/tasks/{job.id}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["mime"] == "image/png"
+    assert body["size"] == len(png)
+    assert body["kind"] == "image"
+    assert body["url"].endswith(f"/v1/media/{ref.token}")
+
+
+@pytest.mark.asyncio
+async def test_completed_task_with_expired_media_omits_metadata(api, store, monkeypatch, tmp_path):
+    """成品已被 TTL 清掉时，补字段不能把整个响应打成 500。
+
+    清理是常态（48h），任务行留得比文件久；这里必须走"没有元数据"的降级分支，
+    而不是 `MediaNotFound` 冒出去。
+    """
+    media_root = tmp_path / "media_gone"
+    real_store_cls = media.MediaStore
+    monkeypatch.setattr(app_module.media, "MediaStore", lambda: real_store_cls(media_root))
+    media_root.mkdir(parents=True, exist_ok=True)
+
+    job = _task_row(store, state=jobs.JobStatus.COMPLETED.value, token="b" * 32)
+    response = await api.get(f"/admin/tasks/{job.id}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert "mime" not in body and "size" not in body
+    assert body["url"].endswith("/v1/media/" + "b" * 32)
+
+
+@pytest.mark.asyncio
 async def test_admin_task_by_id_and_404(api, store):
     job = _task_row(store, state=jobs.JobStatus.QUEUED.value)
     response = await api.get(f"/admin/tasks/{job.id}")
