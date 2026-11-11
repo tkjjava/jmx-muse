@@ -55,6 +55,33 @@ Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Setti
 
 没通知刷新时 Chrome 会继续用旧配置，表现为"代理起了但页面还是连不上"。
 
+> ⚠ **这一步会把浏览器一起换到 18000 上——2026-11-11 20:1x 的真实事故**
+>
+> 系统代理是**全机生效**的，不是只给本项目用。18000 的上游隧道一旦全挂，
+> 表现就是"**浏览器打不开 muse.ai**"，而命令行里的协议探针可能还在用
+> `MUSE_PROTOCOL_PROXY=7890` 正常跑——两边看起来矛盾，其实是两条通道。
+>
+> 当天实测（mihomo 配置 `D:\deep seek\work\mihomo-muse\config.yaml`，
+> 规则 `DOMAIN-SUFFIX,muse.ai,PROXY` → 10 个 vless 节点）：
+>
+> | 探测 | 结果 |
+> | --- | --- |
+> | controller `GET /proxies/US-01..10/delay` | **10/10 全 503**（节点全死） |
+> | `https://muse.ai/` 经 18000 | `ConnectError: SSL UNEXPECTED_EOF_WHILE_READING` |
+> | `https://www.google.com/`、`www.bing.com/` 经 18000 | 200 —— 但那是 `MATCH,DIRECT`，**没走节点**，不证明隧道可用 |
+> | `https://muse.ai/` 经 7890（FlClash） | 200 |
+> | `https://muse.ai/` 直连 | 200 |
+>
+> 教训：`MATCH,DIRECT` 的站点通过代理测通了，**不代表 PROXY 组可用**；
+> 判断隧道死活只看 `muse.ai`（或任何命中 PROXY 规则的域名）这一个指标。
+>
+> 遇到"浏览器打不开 muse.ai"时，按这个顺序处理：
+> 1. 读注册表确认真实值：`Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'` 的 `ProxyServer`；
+> 2. 用上面那张表定位是"隧道死"还是"代理没起"；
+> 3. 隧道死了就换成可用通道（本机实测 7890 与直连都行），改完必须发
+>    `InternetSetOption` 刷新，Chrome 下一次网络变更才生效；
+> 4. 别把"改回 18000"当成恢复现场——它现在指向一条死隧道。
+
 **代理选型兜底（2026-11-11 11:0x 实测）**：本机 mihomo(18000) 的上游节点一度
 全挂（controller `GET /proxies/US-xx/delay` 全 503，`GET /proxies/PROXY` 的
 `now=US-01` 但实际 TLS 握手 `UNEXPECTED_EOF`），此时 FlClash(7890) 仍可用：
