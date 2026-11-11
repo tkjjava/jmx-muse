@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b0d12">
+  <title>Muse Canvas · 无限画布</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop stop-color='%236e8cff'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='%230b0d12'/%3E%3Ccircle cx='16' cy='16' r='7.5' fill='url(%23g)'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="css/base.css">
+  <link rel="stylesheet" href="css/canvas.css">
+  <link rel="stylesheet" href="css/ui.css">
+</head>
+<body>
+  <div id="app" class="app">
+
+    <!-- ── 画布舞台：点阵网格 + 世界层 + 交互覆盖层 ─────────────────────── -->
+    <main id="stage" class="stage" aria-label="无限画布">
+      <div class="stage-glow" aria-hidden="true"></div>
+      <div id="grid" class="grid" aria-hidden="true"></div>
+      <div id="world" class="world"></div>
+      <div id="overlays" class="overlays" aria-hidden="true">
+        <div id="guides" class="guides"></div>
+        <div id="marquee" class="marquee" hidden></div>
+        <div id="size-hint" class="size-hint" hidden></div>
+      </div>
+
+      <!-- 空状态：错落卡片 + 光晕的手绘内联插画 -->
+      <section id="empty-state" class="empty-state" hidden>
+        <svg class="empty-art" viewBox="0 0 320 212" role="img" aria-label="错落堆叠的画布卡片插画">
+          <defs>
+            <linearGradient id="ea-base" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#1a2033"/><stop offset="1" stop-color="#0f121a"/>
+            </linearGradient>
+            <linearGradient id="ea-accent" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#6e8cff"/><stop offset="0.55" stop-color="#8b5cf6"/><stop offset="1" stop-color="#ff8fd8"/>
+            </linearGradient>
+            <linearGradient id="ea-line" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" stop-color="#ffffff" stop-opacity="0.42"/><stop offset="1" stop-color="#ffffff" stop-opacity="0.10"/>
+            </linearGradient>
+            <radialGradient id="ea-glow" cx="0.5" cy="0.5" r="0.5">
+              <stop offset="0" stop-color="#6e8cff" stop-opacity="0.55"/><stop offset="1" stop-color="#6e8cff" stop-opacity="0"/>
+            </radialGradient>
+            <filter id="ea-blur" x="-60%" y="-60%" width="220%" height="220%">
+              <feGaussianBlur stdDeviation="16"/>
+            </filter>
+            <filter id="ea-soft" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="6"/>
+            </filter>
+          </defs>
+          <ellipse cx="160" cy="182" rx="128" ry="20" fill="url(#ea-glow)" filter="url(#ea-blur)"/>
+          <!-- 后层卡片 -->
+          <g transform="translate(78 50) rotate(-7 65 42)">
+            <rect width="132" height="86" rx="12" fill="url(#ea-base)" stroke="#ffffff" stroke-opacity="0.10"/>
+            <rect x="14" y="15" width="60" height="6" rx="3" fill="#ffffff" fill-opacity="0.22"/>
+            <rect x="14" y="28" width="42" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.12"/>
+            <rect x="14" y="58" width="96" height="16" rx="5" fill="#6e8cff" fill-opacity="0.18"/>
+          </g>
+          <!-- 中间卡片：渐变画面 -->
+          <g transform="translate(126 74) rotate(5 62 40)">
+            <rect width="140" height="92" rx="12" fill="#12151c" stroke="#ffffff" stroke-opacity="0.12"/>
+            <clipPath id="ea-clip"><rect x="8" y="8" width="124" height="76" rx="7"/></clipPath>
+            <g clip-path="url(#ea-clip)">
+              <rect x="8" y="8" width="124" height="76" fill="#0d1017"/>
+              <circle cx="46" cy="44" r="26" fill="#6e8cff" fill-opacity="0.65" filter="url(#ea-blur)"/>
+              <circle cx="96" cy="58" r="30" fill="#8b5cf6" fill-opacity="0.55" filter="url(#ea-blur)"/>
+              <circle cx="92" cy="34" r="11" fill="#f6d6ff" fill-opacity="0.55" filter="url(#ea-soft)"/>
+              <path d="M8 72 Q 36 52 64 68 T 132 62 L132 84 L8 84Z" fill="#0b0d12" fill-opacity="0.42"/>
+            </g>
+            <rect x="18" y="76" width="40" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.28"/>
+          </g>
+          <!-- 前层卡片：提示词 + 微光 -->
+          <g transform="translate(172 34) rotate(8 60 32)">
+            <rect width="124" height="78" rx="12" fill="#151a26" stroke="#ffffff" stroke-opacity="0.14"/>
+            <rect x="14" y="16" width="76" height="7" rx="3.5" fill="url(#ea-line)"/>
+            <rect x="14" y="30" width="96" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.14"/>
+            <rect x="14" y="41" width="84" height="5" rx="2.5" fill="#ffffff" fill-opacity="0.11"/>
+            <rect x="14" y="55" width="32" height="12" rx="6" fill="url(#ea-accent)" fill-opacity="0.9"/>
+            <path d="M97 51 l2.4 5.2 5.6 1-4.2 4 1 5.7-4.8-2.7-4.8 2.7 1-5.7-4.2-4 5.6-1z" fill="#c7d2ff" fill-opacity="0.85"/>
+          </g>
+          <!-- 悬浮光点 -->
+          <g fill="#8fa5ff">
+            <circle cx="66" cy="162" r="2.4" fill-opacity="0.7"/>
+            <circle cx="256" cy="142" r="1.8" fill-opacity="0.5"/>
+            <circle cx="284" cy="62" r="2" fill-opacity="0.35"/>
+            <circle cx="48" cy="42" r="1.6" fill-opacity="0.4"/>
+          </g>
+        </svg>
+        <h2 class="empty-title">从一句话开始，铺满整块画布</h2>
+        <p class="empty-sub">输入提示词，或双击空白处放下第一张卡片。<br>空间会自动保存在本机，也可以交给 bridge。</p>
+        <div class="empty-actions">
+          <button id="empty-generate" class="primary-btn" type="button">
+            <span data-icon="sparkles" aria-hidden="true"></span>
+            生成第一张
+          </button>
+          <button id="empty-note" class="ghost-btn" type="button">先放一张便签</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- ── 顶部胶囊工具栏 ─────────────────────────────────────────────── -->
+    <header id="toolbar" class="toolbar glass" role="toolbar" aria-label="画布工具栏">
+      <div class="tb-group">
+        <div class="brand-mark" aria-hidden="true">
+          <span></span>
+        </div>
+        <button id="space-menu-btn" class="tb-btn space-btn" type="button"
+                aria-haspopup="menu" aria-expanded="false" aria-label="空间列表">
+          <span data-icon="layers" aria-hidden="true"></span>
+        </button>
+        <button id="space-name" class="space-name" type="button" title="单击切换空间，双击重命名"
+                aria-label="空间名称，双击重命名"><span id="space-name-text">未命名画布</span></button>
+        <span class="tb-sep" aria-hidden="true"></span>
+        <button id="btn-save" class="save-pill" type="button" aria-label="立即保存画布">
+          <span class="save-dot" aria-hidden="true"></span>
+          <span id="save-text">已保存</span>
+        </button>
+        <span id="readonly-badge" class="readonly-badge" hidden>只读分享</span>
+      </div>
+
+      <div class="tb-group tb-zoom" role="group" aria-label="缩放">
+        <button id="zoom-out" class="tb-btn" type="button" aria-label="缩小" data-icon="minus"></button>
+        <button id="zoom-menu-btn" class="zoom-value" type="button"
+                aria-haspopup="listbox" aria-expanded="false" aria-label="选择缩放比例">
+          <span id="zoom-label">100%</span>
+          <span data-icon="chevron" aria-hidden="true"></span>
+        </button>
+        <button id="zoom-in" class="tb-btn" type="button" aria-label="放大" data-icon="plus"></button>
+      </div>
+
+      <div class="tb-group tb-actions">
+        <button id="undo" class="tb-btn" type="button" aria-label="撤销（Ctrl+Z）" data-icon="undo" disabled></button>
+        <button id="redo" class="tb-btn" type="button" aria-label="重做（Ctrl+Shift+Z）" data-icon="redo" disabled></button>
+        <span class="tb-sep" aria-hidden="true"></span>
+        <button id="muse-import-btn" class="tb-btn" type="button"
+                aria-label="从 muse 导入 Space / 灵感卡" data-icon="sparkles"></button>
+        <button id="share-btn" class="tb-btn" type="button" aria-label="复制只读分享链接" data-icon="copy"></button>
+        <button id="export-btn" class="tb-btn" type="button" aria-label="导出 PNG" data-icon="download"></button>
+        <button id="settings-btn" class="tb-btn" type="button" aria-haspopup="menu"
+                aria-expanded="false" aria-label="设置" data-icon="settings"></button>
+      </div>
+    </header>
+
+    <!-- ── 右侧检查器 ─────────────────────────────────────────────────── -->
+    <aside id="inspector" class="inspector glass" aria-label="检查器">
+      <div id="inspector-body" class="inspector-body"></div>
+    </aside>
+
+    <!-- ── 右下角：缩略图 / 适配 ─────────────────────────────────────── -->
+    <div id="minimap" class="minimap glass" hidden>
+      <canvas id="minimap-canvas" width="384" height="240" aria-label="画布缩略图"></canvas>
+      <span class="minimap-hint">点击跳转</span>
+    </div>
+    <div id="view-controls" class="view-controls glass" role="group" aria-label="视图控件">
+      <button id="minimap-toggle" class="vc-btn" type="button" aria-label="切换缩略图" aria-pressed="false" data-icon="map"></button>
+      <span class="vc-sep" aria-hidden="true"></span>
+      <button id="fit-btn" class="vc-btn" type="button" aria-label="适配全部节点" data-icon="fit"></button>
+    </div>
+
+    <!-- ── 底部提示词条 ───────────────────────────────────────────────── -->
+    <div id="promptbar" class="promptbar glass" role="group" aria-label="生成提示词">
+      <div class="pb-chips">
+        <button id="model-chip" class="chip" type="button" aria-haspopup="listbox" aria-expanded="false"
+                aria-label="选择模型"><span class="chip-dot" aria-hidden="true"></span><span id="model-chip-text">muse-image</span></button>
+        <button id="size-chip" class="chip" type="button" aria-haspopup="listbox" aria-expanded="false"
+                aria-label="选择画面比例"><span data-icon="frame" aria-hidden="true"></span><span id="size-chip-text">1:1</span></button>
+        <span id="batch-chip" class="chip chip-batch" hidden></span>
+      </div>
+      <textarea id="prompt-input" class="prompt-input" rows="1" maxlength="2000"
+                placeholder="描述你想生成的画面…" aria-label="提示词"></textarea>
+      <button id="generate-btn" class="gen-btn" type="button" aria-label="生成图片">
+        <span class="gen-icon" data-icon="sparkles" aria-hidden="true"></span>
+        <span class="gen-label">生成</span>
+        <span class="gen-ring" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <!-- ── Toast ─────────────────────────────────────────────────────── -->
+    <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+
+    <!-- ── 图片 / 视频查看器 ─────────────────────────────────────────── -->
+    <div id="viewer" class="overlay viewer" role="dialog" aria-modal="true" aria-label="媒体查看器" hidden>
+      <div id="viewer-stage" class="viewer-stage">
+        <div id="viewer-media" class="viewer-media"></div>
+      </div>
+      <div class="viewer-bar glass">
+        <span id="viewer-title" class="viewer-title"></span>
+        <span id="viewer-meta" class="viewer-meta"></span>
+        <div class="viewer-tools">
+          <button id="viewer-zoom-out" class="tb-btn light" type="button" aria-label="缩小" data-icon="minus"></button>
+          <button id="viewer-zoom-reset" class="zoom-value light" type="button" aria-label="重置缩放"><span id="viewer-zoom-label">100%</span></button>
+          <button id="viewer-zoom-in" class="tb-btn light" type="button" aria-label="放大" data-icon="plus"></button>
+          <span class="tb-sep" aria-hidden="true"></span>
+          <button id="viewer-download" class="tb-btn light" type="button" aria-label="下载原图" data-icon="download"></button>
+          <button id="viewer-close" class="tb-btn light" type="button" aria-label="关闭查看器" data-icon="x"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── 快捷键面板 / 命令面板 / 确认框 ─────────────────────────────── -->
+    <div id="shortcuts" class="overlay sheet-layer" role="dialog" aria-modal="true" aria-label="快捷键" hidden></div>
+    <div id="palette" class="overlay sheet-layer palette-layer" role="dialog" aria-modal="true" aria-label="命令面板" hidden></div>
+    <div id="confirm" class="overlay sheet-layer confirm-layer" role="dialog" aria-modal="true" aria-label="确认" hidden></div>
+
+    <!-- 浮层菜单宿主（缩放、空间、模型、比例、设置） -->
+    <div id="popover-layer" class="popover-layer"></div>
+
+    <!-- ── 从 muse 导入（只读 Space 预览卡 / 灵感卡） ─────────────────── -->
+    <div id="muse-panel" class="overlay muse-panel" role="dialog" aria-modal="true"
+         aria-label="从 muse 导入" hidden>
+      <div class="muse-backdrop" data-muse-close></div>
+      <section class="muse-dialog glass">
+        <header class="muse-head">
+          <div class="muse-title">
+            <h3>从 muse 导入</h3>
+            <p>只读：Space 预览卡与灵感卡，导出 HTML 一律作为附件下载；不会写入 muse 账号。</p>
+          </div>
+          <button id="muse-close" class="tb-btn light" type="button" aria-label="关闭" data-icon="x"></button>
+        </header>
+        <div class="muse-tabs" role="tablist" aria-label="导入来源">
+          <button id="muse-tab-spaces" class="muse-tab is-active" role="tab" data-muse-tab="spaces"
+                  aria-selected="true" type="button">Spaces</button>
+          <button id="muse-tab-ideas" class="muse-tab" role="tab" data-muse-tab="ideas"
+                  aria-selected="false" type="button">灵感卡</button>
+        </div>
+        <div id="muse-body" class="muse-body" role="tabpanel"></div>
+        <footer class="muse-foot">
+          <span id="muse-status">正在读取 muse 账号…</span>
+          <span class="muse-foot-hint">导入只生成本地画布卡片</span>
+        </footer>
+      </section>
+    </div>
+
+    <!-- ── 分享画布（链接管理：复制 / 轮换 / 撤销） ───────────────────── -->
+    <div id="share-panel" class="overlay share-panel" role="dialog" aria-modal="true"
+         aria-label="分享画布" hidden>
+      <div class="muse-backdrop" data-share-close></div>
+      <section class="muse-dialog glass share-dialog">
+        <header class="muse-head">
+          <div class="muse-title">
+            <h3>分享画布</h3>
+            <p>只读链接：拿到链接的人能缩放、导出，但不能编辑或保存。重新生成会让旧链接立即失效。</p>
+          </div>
+          <button id="share-close" class="tb-btn light" type="button" aria-label="关闭" data-icon="x"></button>
+        </header>
+        <div id="share-body" class="share-body"></div>
+        <footer class="muse-foot">
+          <span id="share-status">正在读取分享状态…</span>
+          <span class="muse-foot-hint">链接即权限，只发给可信的人</span>
+        </footer>
+      </section>
+    </div>
+
+    <!-- 启动遮罩 -->
+    <div id="boot" class="boot" aria-live="polite">
+      <div class="boot-mark"><span></span></div>
+      <div class="boot-text">正在铺开画布…</div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

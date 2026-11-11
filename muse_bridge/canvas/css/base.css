@@ -1,0 +1,252 @@
+/* ============================================================================
+   base.css — 主题变量、重置与全局布局
+   为什么：颜色、圆角、动效曲线集中在这里，三份样式表只消费变量；暗色玻璃
+   面板的所有数值都来自同一组 token，避免各面板自行其是导致视觉不统一。
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* 背景与面板 */
+  --bg: #0b0d12;
+  --bg-deep: #080a0e;
+  --panel: rgba(18, 21, 28, 0.72);
+  --panel-solid: #12151c;
+  --panel-raised: rgba(26, 30, 40, 0.82);
+  --stroke: rgba(255, 255, 255, 0.08);
+  --stroke-strong: rgba(255, 255, 255, 0.14);
+  --stroke-faint: rgba(255, 255, 255, 0.05);
+
+  /* 文本 */
+  --text: #e7eaf3;
+  --text-dim: #a2aabd;
+  --text-faint: #717a8e;
+
+  /* 强调色 */
+  --accent: #6e8cff;
+  --accent-soft: rgba(110, 140, 255, 0.16);
+  --accent-strong: rgba(110, 140, 255, 0.32);
+  --violet: #8b5cf6;
+  --ok: #3ddc97;
+  --warn: #ffb020;
+  --danger: #ff5c72;
+  --pink: #ff8fd8;
+
+  /* 形状 */
+  --radius: 14px;
+  --radius-sm: 10px;
+  --radius-node: 12px;
+  --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  --shadow-soft: 0 8px 28px rgba(0, 0, 0, 0.35);
+  --shadow-node: 0 12px 30px rgba(0, 0, 0, 0.5);
+
+  /* 动效 */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 220ms;
+
+  /* 排版 */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei",
+    "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+
+  /* 布局 */
+  --toolbar-h: 52px;
+  --inspector-w: 300px;
+  --gutter: 16px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+a {
+  color: var(--accent);
+}
+
+img,
+svg,
+video {
+  display: block;
+  max-width: 100%;
+}
+
+/* 统一的键盘焦点环：只在键盘操作时出现，避免鼠标点击一片蓝圈 */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+button:focus:not(:focus-visible),
+textarea:focus:not(:focus-visible),
+input:focus:not(:focus-visible) {
+  outline: none;
+}
+
+::selection {
+  background: rgba(110, 140, 255, 0.38);
+  color: #fff;
+}
+
+/* 玻璃面板的统一配方：半透明底 + 背景模糊 + 1px 内描边 + 大阴影 */
+.glass {
+  background: var(--panel);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+}
+
+/* 不支持 backdrop-filter 时给更实的底色，保证文字对比度 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background: rgba(16, 19, 26, 0.96);
+  }
+}
+
+.app {
+  position: fixed;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(1200px 700px at 18% -8%, rgba(110, 140, 255, 0.10), transparent 60%),
+    radial-gradient(1000px 700px at 88% 108%, rgba(139, 92, 246, 0.10), transparent 62%),
+    linear-gradient(180deg, #0b0d12 0%, #090b10 100%);
+}
+
+/* 图标容器：所有图标都由 js/ui.js 注入内联 SVG，不依赖外部 sprite */
+.ico {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  pointer-events: none;
+}
+
+[data-icon] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* 滚动条：细、半透明、只在悬停时明显 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 99px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* 尊重系统「减少动态效果」偏好：只保留必要的透明度过渡 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+html.reduce-motion *,
+html.reduce-motion *::before,
+html.reduce-motion *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
+@media (max-width: 720px) {
+  :root {
+    --gutter: 10px;
+    --inspector-w: 0px;
+  }
+}
