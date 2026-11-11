@@ -4,3 +4,6 @@ uvicorn>=0.29
 cryptography>=42
 pydantic>=2.6
 playwright>=1.44
+# 注意：websockets 故意不写在这里。纯协议路径是惰性导入（protocol_client.py
+# `_default_ws_opener`），没装时自动回退到本包内置的 ws_fallback，同样能连。
+# 想用官方实现就单独装：pip install websockets>=13

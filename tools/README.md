@@ -30,6 +30,39 @@ kwargs，才证明代理真的用上了。
 | `accept_relay_media.py` | 经 relay 验媒体字段透传 + **按客户端方式取件** | 会 |
 | `diff_check.py` | 差分检查：某个测试在修复前必须失败、修复后必须通过 | 否 |
 | `verify_tests_load_bearing.py` | 抽查测试是否真的钉住行为，而不是恒真 | 否 |
+| `lifecycle_check.py` | 启停恢复校验：快照 → 重启 → 逐项对比（`--chat` 多验一次聊天） | 否 |
+| `doc_assertions.py` | 文档断言审计：行号引用是否失效、含糊时刻计数 | 否 |
+| `peek_muse.py` | 只读取证 muse 页面 DOM（排障用，**不点击不输入**） | 否 |
+
+### 三个"把结论变成可复查命令"的工具
+
+发布候选评估里最容易被口头糊弄的三件事，各配了一支工具：
+
+- `lifecycle_check.py`：**"停得掉、起得来、数据不丢"**。它先快照（端口/pid/
+  `/healthz`/账号总数/成品文件数与字节/账号库大小），再委托 `restart_bridge.py`
+  重启，最后逐项对比；账号变少、成品变少、账号库明显变小都会报 ✗ 并以非零码
+  退出。`snapshot` 子命令只打快照不重启，`--chat` 额外验证"重启后真的能聊天"。
+  ```bash
+  python tools/lifecycle_check.py            # 快照 -> 重启 -> 对比
+  python tools/lifecycle_check.py snapshot   # 只看当前状态
+  python tools/lifecycle_check.py --chat     # 多验一次聊天
+  ```
+- `doc_assertions.py`：**"文档里的行号引用还能不能解析"**。只判定面向本仓库的
+  文档（CHANGELOG/README/tools/README/USAGE/LIVE_RUNBOOK/roadmap/候选报告）；
+  逆向记录里指向上游产物的引用只统计。解析不到、越界、指向空行，三种都算失效。
+  ```bash
+  python tools/doc_assertions.py
+  python tools/doc_assertions.py --json    # 便于接 CI
+  ```
+- `peek_muse.py`：**"页面此刻到底有什么"**。只读：不点击、不输入、不刷新。
+  打印标签页、输入框数量与残留内容、最后一条助手正文与 `data-message-id`。
+  bridge 报"没有任何反应"时用它区分三种情况：输入框有残留（没发出去）、
+  最后 id 没变（真没反应）、id 变了但 bridge 说没反应（判据问题）。
+  ```bash
+  python tools/peek_muse.py               # 驱动会选中的那个 muse 标签
+  python tools/peek_muse.py --all-tabs    # 全部标签
+  python tools/peek_muse.py --screenshot shot.png
+  ```
 
 ### 两个"必须有真实上游产出"的验收
 

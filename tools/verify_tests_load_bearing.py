@@ -134,39 +134,61 @@ def run_reasoning_tests(tree: Path) -> tuple[int, str]:
     return proc.returncode, proc.stdout + proc.stderr
 
 
-fails = []
+USAGE = """用法：python tools/verify_tests_load_bearing.py
 
-def chk(ok, label):
-    print(('  OK   ' if ok else '  FAIL ') + label)
-    if not ok:
-        fails.append(label)
+对每一项 MUTATIONS 变异跑一遍全量 pytest，要求"删掉该行为测试必须变红"。
+必须在仓库根目录跑：它会复制整棵树到临时目录，再逐项变异。
+很慢（每个变异跑一遍测试），不要放进日常 CI 的快速门。"""
 
 
-with tempfile.TemporaryDirectory(prefix='loadbearing-') as tmp:
-    tree = Path(tmp) / 'tree'
-    copy_tree(tree)
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    if args:
+        print(f"不认识的参数：{args}", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
 
-    code, out = run_reasoning_tests(tree)
-    chk(code == 0, 'control: unmutated tree is green')
-    if code != 0:
-        print(out[-1500:])
+    fails = []
 
-    for label, rel, old, new, expected in MUTATIONS:
-        target = tree / rel
-        text = target.read_text(encoding='utf-8').replace('\r\n', '\n')
-        count = text.count(old)
-        chk(count == 1, f'{label}: mutation anchor unique (found {count})')
-        if count != 1:
-            continue
-        target.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+    def chk(ok, label):
+        print(('  OK   ' if ok else '  FAIL ') + label)
+        if not ok:
+            fails.append(label)
+
+
+    with tempfile.TemporaryDirectory(prefix='loadbearing-') as tmp:
+        tree = Path(tmp) / 'tree'
+        copy_tree(tree)
+
         code, out = run_reasoning_tests(tree)
-        target.write_text(text, encoding='utf-8', newline='\n')  # restore immediately
-        chk(code != 0, f'{label}: suite goes red without the feature')
-        went_red = re.search(r'^FAILED tests/[^:]+\.py::' + re.escape(expected),
-                             out, re.M) is not None
-        chk(went_red, f'{label}: the named test ({expected}) is the one that fails')
-        if not went_red and code != 0:
-            print(out[-1200:])
+        chk(code == 0, 'control: unmutated tree is green')
+        if code != 0:
+            print(out[-1500:])
 
-print('\n' + ('TESTS ARE LOAD-BEARING' if not fails else f'{len(fails)} FAILED'))
-sys.exit(1 if fails else 0)
+        for label, rel, old, new, expected in MUTATIONS:
+            target = tree / rel
+            text = target.read_text(encoding='utf-8').replace('\r\n', '\n')
+            count = text.count(old)
+            chk(count == 1, f'{label}: mutation anchor unique (found {count})')
+            if count != 1:
+                continue
+            target.write_text(text.replace(old, new), encoding='utf-8', newline='\n')
+            code, out = run_reasoning_tests(tree)
+            target.write_text(text, encoding='utf-8', newline='\n')  # restore immediately
+            chk(code != 0, f'{label}: suite goes red without the feature')
+            went_red = re.search(r'^FAILED tests/[^:]+\.py::' + re.escape(expected),
+                                 out, re.M) is not None
+            chk(went_red, f'{label}: the named test ({expected}) is the one that fails')
+            if not went_red and code != 0:
+                print(out[-1200:])
+
+    print('\n' + ('TESTS ARE LOAD-BEARING' if not fails else f'{len(fails)} FAILED'))
+    sys.exit(1 if fails else 0)
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

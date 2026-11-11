@@ -91,11 +91,14 @@ class Report:
 
 def _flags(argv: list[str]) -> dict:
     opts = {"relay": "http://127.0.0.1:8765", "model": "muse-1",
-            "skip": False, "attempts": 3}
+            "skip": False, "attempts": 3, "help": False, "error": ""}
     i = 0
     while i < len(argv):
         arg = argv[i]
-        if arg == "--relay":
+        if arg in ("-h", "--help"):
+            opts["help"] = True
+            i += 1
+        elif arg == "--relay":
             opts["relay"] = argv[i + 1]
             i += 2
         elif arg == "--model":
@@ -108,6 +111,9 @@ def _flags(argv: list[str]) -> dict:
             opts["skip"] = True
             i += 1
         else:
+            # 不认识的参数**不能静默忽略**：那会让误输入（比如 `--help`）被当成
+            # "没给参数"，直接跑起会消耗额度的验收（2026-11-11 真踩过）。
+            opts["error"] = f"不认识的参数：{arg}"
             i += 1
     opts["relay"] = opts["relay"].rstrip("/")
     return opts
@@ -182,8 +188,22 @@ def _bare_retry(name: str, attempts: int, run) -> tuple:
     return out
 
 
+USAGE = """用法：python tools/accept_relay_media.py [--relay URL] [--model 名称]
+                                      [--attempts N] [--skip-media-download]
+
+会真的发聊天请求（消耗额度），并且只把"上游真出了附件"当作透传通过；
+上游没出附件时如实报"未触发"，不冒充通过。"""
+
+
 def main(argv: list[str] | None = None) -> int:
     opts = _flags(list(sys.argv[1:] if argv is None else argv))
+    if opts["help"]:
+        print(USAGE)
+        return 0
+    if opts["error"]:
+        print(opts["error"], file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
     relay, model, attempts = opts["relay"], opts["model"], opts["attempts"]
     report = Report("B4 媒体字段经 relay 透传且可用")
     headers = auth_headers()

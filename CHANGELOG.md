@@ -8,8 +8,9 @@
 
 为什么不改成精确值：当时没有逐条记录秒级时刻，事后"补齐"只能靠编——那比含糊
 更糟。真要精确时刻，以 `bridge.log` / `relay.log` 里的记录为准（那些是运行时
-真正写下的）。判据来自 C3 文档审计（2026-11-11）：全仓库这类写法共 85 处，
-`docs/PROTOCOL.md` 31、本文件 20、`docs/CANVAS_DESIGN.md` 10，其余散落。
+真正写下的）。判据来自 C3 文档审计（2026-11-11，可用 `python tools/doc_assertions.py`
+复查）：全仓库这类写法共 **88 处**，`docs/PROTOCOL.md` 31、本文件 22、
+`docs/CANVAS_DESIGN.md` 10，其余散落。
 
 ## [0.4.2] - 2026-11-11（路线图 P0–P2 落地，未发布）
 
@@ -371,7 +372,7 @@ token 对照：直连桥 `200` / 392122 字节，经网关 `404`。表现是"字
 #### 本轮基线
 
 - `ruff check muse_bridge tests tools` → All checks passed（C3 后复跑仍全绿）
-- `pytest -q` → **1582 passed / 0 failed**（P1-B3~B5 轮是 1572，C3 又加 10 条钉子）
+- `pytest -q` → **1620 passed / 0 failed**（P1-B3~B5 轮是 1572，C3 加了 48 条钉子）
 - `python tools/acceptance.py` → **21/21 通过**（media 6 + stream 10 + sweep 5）
 - `python tools/acceptance.py generation` → **6/6 通过**
 
@@ -449,6 +450,41 @@ token 对照：直连桥 `200` / 392122 字节，经网关 `404`。表现是"字
 | 数据 | `data/media` **24 → 24 个 / 25404473 B 不变**；`data/muse.db` **1822720 B 不变** |
 
 结论：重启不重建账号库、不清理成品目录。这条也是回退方案的前提（§8）。
+
+#### 工具化：把 C3 的三件事固化成可复查命令
+
+C3 的结论原先只活在这一份文档里——换台机器、换个人就得手抄一遍命令，而且很容易
+只看 `/healthz` 200 就宣布"恢复通过"。所以把三件事各配了一支工具：
+
+- **`tools/lifecycle_check.py`**：快照（端口/pid/`/healthz`/账号总数/成品文件数与
+  字节/账号库大小）→ 委托 `restart_bridge.py` 重启 → 逐项对比。账号变少、成品变少、
+  账号库明显变小都会报 ✗ 并以非零码退出；`--chat` 再多验一次"重启后真的能聊天"。
+  **实测**：一次完整跑通，结论"恢复通过"、聊天 200 正文 `'又为你画了一张新的。OK'`。
+- **`tools/doc_assertions.py`**：行号引用审计。只判定面向本仓库的 8 份文档，
+  逆向记录里指向上游产物的引用只统计；解析不到/越界/**指向空行**三种都算失效。
+  当前结果：可解析 10 条、失效 0 条、上游引用 377 条、含糊时刻 88 处。
+- **`tools/peek_muse.py`**：只读取证页面 DOM（不点击不输入）。bridge 报"没有任何
+  反应"时用它区分三种情况：输入框有残留（没发出去）、最后 `data-message-id` 没变
+  （真没反应）、id 变了但 bridge 说没反应（判据问题，0.4.2 已修）。
+
+**顺带修掉三处"工具自身"的缺陷**（都是这轮写测试时暴露的）：
+
+- `accept_video.py` 不认识 `--help`，把它**当成提示词**提交成视频任务。真踩到了：
+  留下两条 `prompt='--help'` 的失败任务（因账号不可派单而在派单前失败，
+  **未消耗上游额度**），已用 `POST /admin/tasks/clear` 清掉；另有一条早先遗留的、
+  已过期 14 小时的 `queued` 任务行，也已删除。
+- `accept_relay_media.py` 对未知参数**静默忽略**，于是 `--help` 直接跑起整轮验收
+  （消耗了几次聊天额度）。现在两者都严格：`-h/--help` 只打用法返回 0，
+  未知参数返回 2 且**在返回前不发任何请求**。
+- `verify_tests_load_bearing.py` 原来是顶层执行体——`import` 一次就会跑 19 轮 pytest。
+  已收进 `main()` + `if __name__ == "__main__"` 守卫，import 用时从 >30 s 降到 0.025 s。
+
+新增两条测试文件钉住上面这些：`tests/test_tools_cli_contract.py`（参数契约：
+help/未知参数不许触网）、`tests/test_tools_portability.py`（能编译、README 登记、
+无本机绝对路径常量、有 main 守卫）。
+
+**最终基线**：`pytest -q` → **1620 passed**、ruff 全绿；重启后
+`acceptance.py stream` **10/10**、`sweep` **5/5**；成品目录 24 个 / 25404473 B 不变。
 
 ## [0.4.1] - 2026-11-11（真机活网轮，未发布）
 

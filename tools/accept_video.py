@@ -47,12 +47,32 @@ def is_video(head: bytes) -> tuple[bool, str]:
     return False, f"未知头 {head[:12]!r}"
 
 
+USAGE = """用法：python tools/accept_video.py [--timeout 秒] ["提示词"]
+
+不给提示词时用内置的那句（会真的生成视频、消耗额度）。
+工具会把**任何以 - 开头的参数**当成错误而不是提示词——否则 `--help` 这类
+误输入会被原样提交成生成任务（2026-11-11 真踩过一次：留下两条 prompt='--help'
+的失败任务）。"""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     timeout = 700.0
+    if args and args[0] in ("-h", "--help"):
+        print(USAGE)
+        return 0
     if args and args[0] == "--timeout":
+        if len(args) < 2:
+            print(USAGE, file=sys.stderr)
+            return 2
         timeout = float(args[1])
         args = args[2:]
+    unknown = [a for a in args if a.startswith("-")]
+    if unknown:
+        print(f"不认识的参数：{unknown}（为避免把参数当提示词提交，这里直接拒绝）",
+              file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
     prompt = args[0] if args else "一只猫在草地上奔跑，镜头缓慢推进"
 
     checks: list[tuple[str, bool, str]] = []

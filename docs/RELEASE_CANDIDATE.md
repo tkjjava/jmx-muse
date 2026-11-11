@@ -6,7 +6,7 @@
 
 ## 结论（先给答案）
 
-- **代码侧可以进入发布候选**：测试基线可信（`1582 passed` / `ruff` 全绿），
+- **代码侧可以进入发布候选**：测试基线可信（`1620 passed` / `ruff` 全绿），
   启停恢复有实测记录，媒体交付验收通过，P0 生命周期不变量有专项用例。
 - **有两处缺口，不冒充通过**：
   1. relay 侧"媒体经下游透传"本轮**未触发**（上游对纯文本提示没回附件）；
@@ -36,9 +36,11 @@
 | `muse_bridge/media.py` | 53 | 1 | 原子写、MIME 嗅探、超龄清扫、Range 语义 |
 | `muse_bridge/pool.py` | 32 | 2 | 驱动二选一（协议优先/浏览器兜底）、失败分类 |
 
-新增工具 9 个（`tools/`）：`acceptance.py`（活网验收 21 项）、`accept_relay_media.py`
-（relay 媒体透传验收）、`accept_video.py`、`bridge_ops.py`（启停/状态）、
-`refresh_account.py`、`diff_check.py`、`restart_bridge.py`、`README.md`。
+新增工具共 11 支（`tools/`，另有 `README.md` 索引）：`acceptance.py`（活网验收 21 项）、
+`accept_relay_media.py`（relay 媒体透传验收）、`accept_video.py`、`bridge_ops.py`
+（状态/观测/日志）、`refresh_account.py`、`diff_check.py`、
+`verify_tests_load_bearing.py`、`restart_bridge.py`、`lifecycle_check.py`
+（启停恢复校验）、`doc_assertions.py`（文档断言审计）、`peek_muse.py`（只读页面取证）。
 
 > 说明：`tools/` 是从 `work/` 里的一次性探针**清洗**而来——原先硬编码本机路径
 > 与密钥、别人拿到跑不起来，且探针可能与产品走不同契约（2026-11-11 那次
@@ -47,11 +49,13 @@
 
 ## 2. 文档断言审计
 
+审计结果由 **`python tools/doc_assertions.py`** 产出（可随时复查，`--strict` 接 CI）。
+
 | 审计项 | 结果 | 处理 |
 | --- | --- | --- |
-| 仓库内 `file.py:line` 引用 | **219 处全部可解析，0 处陈旧** | 无需处理 |
-| 指向仓库外上游产物的行号 | 304 处（12 份逆向记录） | 约定为"只统计不判定"，因为这些源文件本仓库不持有 |
-| 含糊时刻（`16:1x` 一类） | **85 处** | 不编造精确值；在 `CHANGELOG.md` 顶部写明"时间约定" |
+| 面向本仓库的 8 份文档里的 `file.py:line` 引用 | **10 条全部可解析到非空行，0 条失效** | 无需处理 |
+| 指向仓库外上游产物的行号 | 377 处（12 份逆向记录） | 约定为"只统计不判定"，因为这些源文件本仓库不持有 |
+| 含糊时刻（`16:1x` 一类） | **88 处** | 不编造精确值；在 `CHANGELOG.md` 顶部写明「时间约定」 |
 | 已过时的断言 | 1 处：原"本机无 relay 环境，B4 保留未验收" | 改为如实三段式（relay 1.13.1 已跑通、媒体项未触发） |
 | 未证明的断言 | 见下表 | 逐条降级或标注边界 |
 
@@ -137,9 +141,12 @@
 ### 4.1 依赖
 
 - `requirements.txt` 6 项全部满足（实测版本）：`httpx 0.28.1`、`fastapi 0.143.3`、
-  `uvicorn 0.54.0`、`cryptography 50.0.1`、`pydantic 2.14.1`、`playwright 1.64.0`；
-  Noise 路径另依赖 `websockets 17.2`（未写进 requirements，由 playwright/httpx
-  生态带来——**这一条记进待办，见 §8**）。
+  `uvicorn 0.54.0`、`cryptography 50.0.1`、`pydantic 2.14.1`、`playwright 1.64.0`。
+- Noise 协议路径**不硬依赖** `websockets`：`protocol_client._default_ws_opener()`
+  惰性导入它（本机装了 17.2），没装则自动回退到本包内置的 `ws_fallback`
+  （自带完整 WebSocket 实现，导出 `WebSocket`/`FrameHead` 等）。所以它没写进
+  `requirements.txt` 是**有意为之**，不是漏项——`requirements.txt` 里已加注释说明。
+  （C3 第一版稿子把这条记成"待办欠账"，核对源码后更正。）
 - `python -m pip check` → `No broken requirements found.`
 - `python -m pip install -r requirements.txt --dry-run` → 全部
   `Requirement already satisfied`（无任何待装项）。
@@ -181,15 +188,21 @@ python tools\restart_bridge.py --log 'D:\deep seek\work\bridge.log'
 结论：**重启不重建账号库、不清理成品目录**。这条同时是回退方案的前提——回退
 代码不会弄丢账号与媒体（`.env`、`data/`、`*.db` 都在 `.gitignore` 里，未被跟踪）。
 
+这一节的步骤已固化成可重复命令：`python tools/lifecycle_check.py`
+（快照 → 重启 → 逐项对比，任一退化项报 ✗ 并以非零码退出；加 `--chat`
+再多验一次"重启后真的能聊天"）。换机器、换人复核时不必再手抄一遍命令。
+
 ## 5. 验收记录（2026-11-11 本次实跑，不含历史口头结论）
 
 | 验收项 | 命令 | 结果 |
 | --- | --- | --- |
-| bridge 全量测试 | `python -m pytest -q` | **1582 passed**（22.05 s） |
+| bridge 全量测试 | `python -m pytest -q` | **1620 passed**（23.29 s） |
 | bridge 静态检查 | `python -m ruff check muse_bridge tests tools` | All checks passed |
 | bridge 成品链路 | `python tools\acceptance.py media` | **6/6**（407142 B，octet-stream，206，416，404） |
 | bridge 流式 | `python tools\acceptance.py stream` | **10/10**（含"非流式同样成功 200"） |
 | bridge 清扫 | `python tools\acceptance.py sweep` | **5/5** |
+| 启停恢复（工具化） | `python tools\lifecycle_check.py verify --chat` | **恢复通过**：账号 1→1、媒体/库不变、聊天 200 |
+| 文档断言审计 | `python tools\doc_assertions.py` | **失效 0 条**；10 条仓库内引用可解析、377 条上游引用只统计 |
 | relay 媒体透传 | `python tools\accept_relay_media.py --relay … --model muse-1` | **3/3 通过，2 项未触发** |
 | relay 健康 | `GET http://127.0.0.1:8765/healthz` | 200 `{"status":"ok","version":"1.13.1"}` |
 | relay 全量 | 解压后的 `Muse-Relay-V1.13.1.zip` 内跑 `pytest` | **346 passed / 7 skipped** |
@@ -209,7 +222,7 @@ python tools\restart_bridge.py --log 'D:\deep seek\work\bridge.log'
 
 | 门槛 | 状态 | 依据 |
 | --- | --- | --- |
-| 可信的测试基线 | ✅ | 1582 passed / ruff 全绿；relay 346 passed / 7 skipped |
+| 可信的测试基线 | ✅ | 1620 passed / ruff 全绿；relay 346 passed / 7 skipped |
 | P0 生命周期不变量有专项用例 | ✅ | 暖池租用归属、并发拒绝、失败清理等用例在 `tests/` 内 |
 | ≥1 条明确记录的媒体交付验收 | ✅ | bridge media 6/6（含 HEAD/206/416/404） |
 | relay / 客户端覆盖说明 | ⚠ 部分 | relay 媒体项"未触发"；非 Chrome 客户端未测（§3.4） |
@@ -238,6 +251,8 @@ git checkout 34254d2 -- muse_bridge/driver.py
 
 - 回退**不会**影响运行数据：`.env`、`data/`、`*.db` 均被 `.gitignore` 排除，
   实测重启前后账号数、媒体文件数与字节、账号库大小均不变（§4.4）。
+  回退后想自己复核一遍，直接跑 `python tools/lifecycle_check.py verify --chat`：
+  它会在同一条命令里把"停得掉、起得来、数据不丢、还能聊天"重新验一次。
 - relay 侧回退：`D:\deep seek\relay\Muse-Relay-V1.13.1.zip` 是当前发布包（113 项，
   解压后 346 passed / 7 skipped）；要退回旧版就恢复上一份解压目录（V1.12.8 目录
   里放的是 1.13.1 代码，不要再被目录名误导）。
@@ -251,7 +266,8 @@ git checkout 34254d2 -- muse_bridge/driver.py
    `MUSE_MAX_REFERENCE_FILES`（报 400）语义冲突，统一成哪个是**对外契约变更**，
    需要拍板后再改。
 4. **非 Chrome 客户端验收**：是否排进下一轮（需要真实 GUI/移动端环境）。
-5. **`websockets` 是否写进 `requirements.txt`**：Noise 协议路径直接 import 它，
-   现在靠环境里已有版本；写进声明能让"照 requirements 装"的环境也跑协议路径。
+5. ~~**`websockets` 是否写进 `requirements.txt`**~~ **已结清**：核对源码后确认它是
+   可选依赖（惰性导入 + 内置 `ws_fallback` 兜底），不写进 requirements 是对的；
+   已在 §4.1 说明，并要求"用官方实现"的部署自行 `pip install websockets>=13`。
 6. **`restart_bridge.py` 的默认是否对齐文档**：它打开协议驱动与暖池（§3.1），
    与代码默认不同。要么改工具、要么在发布说明里显著标注——本轮选择了后者。
