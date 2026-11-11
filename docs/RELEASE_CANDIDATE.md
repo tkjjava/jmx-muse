@@ -6,7 +6,7 @@
 
 ## 结论（先给答案）
 
-- **代码侧可以进入发布候选**：测试基线可信（`1630 passed` / `ruff` 全绿），
+- **代码侧可以进入发布候选**：测试基线可信（`1633 passed` / `ruff` 全绿），
   启停恢复有实测记录，媒体交付验收通过，P0 生命周期不变量有专项用例。
 - **有两处缺口，不冒充通过**：
   1. relay 侧"媒体经下游透传"本轮**未触发**（上游对纯文本提示没回附件）；
@@ -198,7 +198,7 @@ python tools\restart_bridge.py --log 'D:\deep seek\work\bridge.log'
 
 | 验收项 | 命令 | 结果 |
 | --- | --- | --- |
-| bridge 全量测试 | `python -m pytest -q` | **1630 passed**（21.62 s） |
+| bridge 全量测试 | `python -m pytest -q` | **1633 passed**（22.79 s） |
 | bridge 静态检查 | `python -m ruff check muse_bridge tests tools` | All checks passed |
 | bridge 成品链路 | `python tools\acceptance.py media` | **6/6**（407142 B，octet-stream，206，416，404） |
 | bridge 流式 | `python tools\acceptance.py stream` | **10/10**（含"非流式同样成功 200"） |
@@ -225,7 +225,7 @@ python tools\restart_bridge.py --log 'D:\deep seek\work\bridge.log'
 
 | 门槛 | 状态 | 依据 |
 | --- | --- | --- |
-| 可信的测试基线 | ✅ | 1630 passed / ruff 全绿；relay 346 passed / 7 skipped |
+| 可信的测试基线 | ✅ | 1633 passed / ruff 全绿；relay 346 passed / 7 skipped |
 | P0 生命周期不变量有专项用例 | ✅ | 暖池租用归属、并发拒绝、失败清理等用例在 `tests/` 内 |
 | ≥1 条明确记录的媒体交付验收 | ✅ | bridge media 6/6（含 HEAD/206/416/404） |
 | relay / 客户端覆盖说明 | ⚠ 部分 | relay 媒体项"未触发"；非 Chrome 客户端未测（§3.4） |

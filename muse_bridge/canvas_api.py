@@ -44,6 +44,7 @@ key；`/shares/{token}` 那种免鉴权读口不适用于这里（唯一例外�
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import re
@@ -75,6 +76,8 @@ from .muse_spaces import (
     validate_slug,
 )
 from .store import AccountStore
+
+logger = logging.getLogger(__name__)
 
 #: 前端静态资产的根目录。Lead 用它挂 `StaticFiles(directory=STATIC_DIR)`；
 #: 本模块不建目录、不托管（`muse_bridge/canvas/` 由前端负责）。
@@ -468,7 +471,11 @@ def get_account_store() -> AccountStore | None:
             if store is None:
                 store = _account_stores[db_path] = AccountStore(db_path)
             return store
-    except Exception:  # 配置/权限/磁盘问题一律按"没有账号"处理，不泄漏细节
+    except Exception as exc:  # 配置/权限/磁盘问题一律按"没有账号"处理，不泄漏细节
+        # 对外仍然回 503/`ok:false`（不带细节），但**日志要留一行**：否则库路径写错、
+        # 目录权限不对这类问题会表现成"这台 bridge 没有 muse 账号"，排查方向全错。
+        # 只记类型与消息到 debug，运维调日志级别即可看到，不会进响应。
+        logger.debug("画布账号库不可用（按无账号处理）：%s", exc)
         return None
 
 

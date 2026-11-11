@@ -372,7 +372,7 @@ token 对照：直连桥 `200` / 392122 字节，经网关 `404`。表现是"字
 #### 本轮基线
 
 - `ruff check muse_bridge tests tools` → All checks passed（C3 后复跑仍全绿）
-- `pytest -q` → **1630 passed / 0 failed**（P1-B3~B5 轮是 1572，C3 加了 58 条钉子）
+- `pytest -q` → **1633 passed / 0 failed**（P1-B3~B5 轮是 1572，C3 加了 61 条钉子）
 - `python tools/acceptance.py` → **21/21 通过**（media 6 + stream 10 + sweep 5）
 - `python tools/acceptance.py generation` → **6/6 通过**
 
@@ -483,7 +483,7 @@ C3 的结论原先只活在这一份文档里——换台机器、换个人就�
 help/未知参数不许触网）、`tests/test_tools_portability.py`（能编译、README 登记、
 无本机绝对路径常量、有 main 守卫）。
 
-**最终基线**：`pytest -q` → **1630 passed**、ruff 全绿；重启后
+**最终基线**：`pytest -q` → **1633 passed**、ruff 全绿；重启后
 `acceptance.py stream` **10/10**、`sweep` **5/5**；成品目录 24 个 / 25404473 B 不变。
 
 ### 可观测性补强：驱动选择三态、参考素材截断（2026-11-11 21:5x）
@@ -516,6 +516,17 @@ help/未知参数不许触网）、`tests/test_tools_portability.py`（能编译
 自己的计数、生成路径同样计数、强制回退不算误报、开关每次现读）与
 `tests/test_references_truncation_observability.py`（3 条：未超不计数、超限保序
 截断且 +1、上限来自配置而非写死）。
+
+**另两处"失败即静默"也补上痕迹**（同一轮顺手做掉）：
+
+- `app._job_response`：任务已完成、但成品文件已被 TTL 清扫时，响应里没有
+  mime/size。以前直接 `pass`，运维分不清"文件被扫掉了"还是"本来就没成品"；
+  现在计 `media_meta_missing`。
+- `canvas_api.get_account_store`：账号库打不开（路径错/权限/磁盘）一律按
+  "没有账号"处理——这是对的（对外回 503/`ok:false`，不泄漏配置细节），但以前连
+  异常类型都不记，于是"库坏了"和"真没有账号"在运维眼里一模一样。现在落一行
+  debug 日志（只在服务端，不进响应）。
+  测试见 `tests/test_silent_failure_traceability.py`（3 条）。
 
 ## [0.4.1] - 2026-11-11（真机活网轮，未发布）
 

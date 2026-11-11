@@ -995,7 +995,9 @@ def _job_response(job: jobs.Job) -> dict:
                 ref = media.MediaStore().ref(token)
             except media.MediaError:
                 # 文件已被清理（TTL）或不存在：不带元数据，不要因为补字段而报错。
-                pass
+                # 但这种情况**必须可数**：客户端会看到一个 `completed` 却没有
+                # mime/size 的任务，若不留痕，只能猜"是不是 TTL 扫掉了"。
+                observability.bump("media_meta_missing")
             else:
                 payload["mime"] = ref.mime
                 payload["size"] = ref.size
