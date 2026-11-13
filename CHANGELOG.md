@@ -1,12 +1,15 @@
 ## 2026-11-14 — `chat.history` 恢复接口取证（未接入）
 
-- 前端静态证据：断线恢复走 `GET /chat/history`（参数 limit/transcript_mode/[session_id]），
-  按 chat_events seq 合并、transcript_revision 防覆盖；非 live 补发。
-- 新增最小客户端 `chat_history()`（1..200 limit、GET+query+空 body、信封解包）及 8 条帧级回归。
+- 前端静态证据：断线恢复走 `GET /chat/history`（参数 limit/transcript_mode/[session_id]，
+  分页 before_seq/after_seq），按 chat_events seq 合并、transcript_revision 防覆盖；非 live 补发。
+- 新增最小客户端 `chat_history()`（1..200 limit、GET+query+空 body、data/result 信封解包）
+  及 10 条帧级回归。
 - 三次活网尝试均未取得响应：两次停在聊天阶段，一次纯连接取历史在请求期遇到
-  `InvalidStatus HTTP 502`（瞬时握手故障，非路由被拒）。因此不接入自动恢复，
-  保持"重连后无权威完成即报不完整"的保守策略。
-- 证据见 docs/2026-11-14_history-recovery-probe.md；下一步在线路可用时打印响应结构再决定。
+  `InvalidStatus HTTP 502`（有/无代理均复现，属上游握手瞬时故障，非路由被拒）。
+  因此不接入自动恢复，保持"重连后无权威完成即报不完整"的保守策略。
+- 新增 `muse_bridge/history.py`：宽容解析历史页（`chat_events`/`transcript_revision`/
+  `has_more`、事件文本优先级、seq 排序），16 条纯函数回归；**未接入**引擎自动恢复。
+- 证据见 docs/2026-11-14_history-recovery-probe.md。
 
 ---
 

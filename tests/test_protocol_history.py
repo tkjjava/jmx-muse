@@ -34,6 +34,14 @@ async def test_chat_history_accepts_bare_payload_and_thread_session():
         )
 
 
+@pytest.mark.parametrize("envelope", ["data", "result"])
+async def test_chat_history_unwraps_envelope_key(envelope):
+    body = {envelope: {"chat_events": [{"seq": 2}], "has_more": False}}
+    async with pipe(lambda *a: json_reply(body)) as (client, _ws):
+        payload = await client.chat_history(limit=1)
+        assert payload == {"chat_events": [{"seq": 2}], "has_more": False}
+
+
 @pytest.mark.parametrize("limit", [0, 201, True, 3.5, "30"])
 async def test_chat_history_rejects_unusable_limit_before_send(limit):
     async with pipe() as (client, ws):

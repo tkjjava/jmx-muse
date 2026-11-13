@@ -1539,10 +1539,14 @@ class HatchProtocolClient:
             params["session_id"] = session_id
         path = "/chat/history?" + urlencode(params)
         result = await self._request_json("GET", path, None, timeout)
-        # Frontend RPC results are envelope-shaped (`ok`/`data`); accept either
-        # the envelope or a bare payload so downstream code can stay tolerant.
-        data = result.get("data")
-        return data if isinstance(data, dict) else result
+        # Frontend RPC results are envelope-shaped; accept `data`/`result`
+        # envelopes or a bare payload. `muse_bridge.history` also tolerates
+        # envelopes, so unwrapping here is only convenience.
+        for key in ("data", "result"):
+            inner = result.get(key)
+            if isinstance(inner, dict):
+                return inner
+        return result
 
     async def register_capabilities(self, caps: list[str] | None = None) -> dict:
         """POST /client/register-capabilities：body 只有 `client_id`。
