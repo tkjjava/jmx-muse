@@ -100,6 +100,10 @@ event: {seq:int, event_name:"message.assistant"|"message.user",
 回归：4 条驱动层用例（恢复尾部、transcript-only、矛盾的 done 文本被忽略、
 字符串投影同样带尾部）。
 
+可观测：引擎在成功/未命中/请求失败三态分别计数 `chat_history_recovered` /
+`chat_history_recovery_missed` / `chat_history_recovery_failed`，驱动补发尾部时
+计数 `chat_done_tail_emitted`，都可在 `/admin/observability` 读取（USAGE §10.5）。
+
 ## 恢复接线
 
 `ProtocolEngine(history_recovery=True)`（默认）：

@@ -1314,6 +1314,29 @@ async def test_chat_recovery_fetch_failure_keeps_incomplete_error():
     assert len(client.history_calls) == 1
 
 
+async def test_chat_recovery_records_observability_counters():
+    from muse_bridge import observability
+
+    observability.reset()
+    try:
+        recovered = resumed_client("9+9等于", history=committed_history("9+9等于18。"))
+        assert (await ProtocolEngine(recovered).collect_chat("9+9", timeout=5))[0] == (
+            "9+9等于18。"
+        )
+        missed = resumed_client("9+9等于", history=committed_history("不相关的正文"))
+        with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+            await ProtocolEngine(missed).collect_chat("9+9", timeout=5)
+        failed = resumed_client("9+9等于", history_error=RuntimeError("history down"))
+        with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+            await ProtocolEngine(failed).collect_chat("9+9", timeout=5)
+        counters = observability.snapshot()["counters"]
+        assert counters.get("chat_history_recovered") == 1
+        assert counters.get("chat_history_recovery_missed") == 1
+        assert counters.get("chat_history_recovery_failed") == 1
+    finally:
+        observability.reset()
+
+
 async def test_chat_recovery_streams_partial_deltas_then_complete_done_text():
     client = resumed_client(
         "9+9等于",

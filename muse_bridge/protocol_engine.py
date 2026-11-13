@@ -49,7 +49,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from muse_bridge import env, refs, session_http
+from muse_bridge import env, observability, refs, session_http
 from muse_bridge.history import latest_assistant_text
 
 if TYPE_CHECKING:  # 落盘前不得运行时 import，否则整包 import 会炸
@@ -1122,10 +1122,13 @@ class ProtocolEngine:
         try:
             page = await self._invoke("chat_history", limit=20, timeout=30.0)
         except Exception:  # noqa: BLE001 - recovery must never mask the real error
+            observability.bump("chat_history_recovery_failed")
             return None
         full = latest_assistant_text(page)
         if not full or not full.startswith(partial) or len(full) <= len(partial):
+            observability.bump("chat_history_recovery_missed")
             return None
+        observability.bump("chat_history_recovered")
         return full
 
     async def _run(

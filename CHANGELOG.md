@@ -15,6 +15,9 @@
 - 关键修正：历史 seq 与 live 流 seq 不是同一序列（683 vs 734），移除游标比较守卫。
 - 驱动层补齐传递：`stream_reply_events` 收到 `done` 时只补发缺失尾部，恢复全文
   与 transcript-only 回合正文不再被 app 层丢弃；4 条驱动回归。
+- 恢复可观测：新增 `chat_history_recovered` / `chat_history_recovery_missed` /
+  `chat_history_recovery_failed` / `chat_done_tail_emitted` 计数（`/admin/observability`），
+  文档见 USAGE §10.5；1 条引擎回归。
 - 证据见 docs/2026-11-14_history-recovery-probe.md。
 
 ---

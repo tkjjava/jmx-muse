@@ -463,6 +463,10 @@ curl -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8788/admin/observabi
     "browser_driver_built": 0,
     "protocol_fallback": 1,
     "chat_media_fetch_failed": 0,
+    "chat_history_recovered": 0,
+    "chat_history_recovery_missed": 0,
+    "chat_history_recovery_failed": 0,
+    "chat_done_tail_emitted": 0,
     "media_sweep_runs": 3,
     "media_sweep_removed": 41
   },
@@ -482,6 +486,12 @@ curl -H "Authorization: Bearer $ADMIN_KEY" http://127.0.0.1:8788/admin/observabi
   WARNING 日志（只含异常类型与消息，不含 cookie）。
 - `media_sweep_runs` 与 `media_sweep_removed` 分开看：前者证明后台清理**活着**，
   后者是实际回收量。只有后者的话，"没删东西"和"没在跑"分不清。
+- `chat_history_recovered`：断线回合从已提交历史取回了完整正文（恢复成功）。
+  `chat_history_recovery_missed` 是"查了历史但对不上严格前缀"，`chat_history_recovery_failed`
+  是历史请求本身失败——两者都会让该回合按"连续性无法确认"报错，不是静默失败。
+- `chat_done_tail_emitted`：驱动把 `done` 里的完整正文补发到 app 层。
+  transcript-only 回合与断线恢复都会 +1；如果它很大而用户仍看到截断回答，
+  说明问题在更上层的事件消费。
 
 **媒体清理**：`data/media/` 下的成品按 `MUSE_MEDIA_TTL`（默认 172800 秒 = 2 天）
 过期，后台每小时清一次（`MUSE_MEDIA_SWEEP_INTERVAL`，默认 3600 秒）。清理只删
