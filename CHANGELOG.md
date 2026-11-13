@@ -15,6 +15,9 @@
 - 活网取消核验：ACK 返回 `cancelled=true`（0.442 秒），但 ACK 后仍收到 8 个已缓冲正文增量，
   最终以 `agent.status:online` 收尾，未出现 `interrupted`/`message_done`。因此取消 ACK
   不等于上游立即停止；新增回归钉住"取消不得中止本地订阅/完成状态"。全量更新为 1881 passed。
+- 新增 `tools/protocol_cancel_timing.py`：只读账号库、输出脱敏时序 JSON；第二次独立运行
+  复现（ACK 0.487 秒、ACK 后 13 个正文增量、`agent.status:online` 终态、无 message_done）。
+- 全量回归更新为 **1884 passed**（含工具可移植性钉子），ruff/文档/差异检查通过。
 - 未观察到 `interrupted` 事件本身，取消 ACK→实际停止时序仍未验证；不宣称该链路已打通。
 
 ---

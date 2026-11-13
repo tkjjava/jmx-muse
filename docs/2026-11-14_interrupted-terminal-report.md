@@ -77,6 +77,27 @@ python tools/doc_assertions.py
 "取消请求不得中止本地订阅、不得改动完成状态或连接"。反过来也不能把 ACK 写成
 "所有后台工作已停止"。
 
+### 用仓库工具复现
+
+上述结论已整理为可复现工具；它只读打开账号库、输出脱敏 JSON（无正文/账号/令牌）：
+
+```powershell
+python tools/protocol_cancel_timing.py --observe 8
+```
+
+工具对一次自行发起的短回合执行同样的流程，第二次运行结果：
+
+```json
+{"ok":true,"via":"direct_noise_protocol","cancelled_ack":true,
+ "own_text_before_cancel":true,"ack_latency_s":0.487,
+ "after_ack_text_events":13,"post_ack_observation_s":0.001,
+ "terminal_reason":"agent.status:online","recognized_terminal":true,
+ "saw_message_done":false,"done_statuses":[],"elapsed_s":10.757}
+```
+
+两次独立运行都复现了同一模式：ACK 后仍有已缓冲正文、终态为 `agent.status:online`、
+没有 `message_done`。这加强了"ACK 与停止时刻解耦"的判断，但不改变下面的未验证项。
+
 ## 尚未覆盖
 
 活网仍未观察到 `interrupted` 事件本身：无法确认取消必然产生它、其到达时延，以及
