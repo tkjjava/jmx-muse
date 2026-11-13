@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 from types import SimpleNamespace
@@ -293,6 +294,162 @@ async def test_stream_reply_is_string_projection_of_events():
     parts = [part async for part in driver.stream_reply("hi", timeout=3.0)]
     assert parts == ["你", "好"]
     assert "".join(parts) == "你好"
+
+
+@pytest.mark.asyncio
+async def test_stream_events_done_closes_retained_engine_generator(monkeypatch):
+    """done returns before source exhaustion; cleanup cannot depend on source GC."""
+    driver, _client, engine = make_driver()
+    finalized = []
+    reached_after_done = []
+
+    async def source():
+        try:
+            yield {"type": "delta", "text": "正文"}
+            yield {"type": "done"}
+            reached_after_done.append(True)
+        finally:
+            finalized.append(True)
+
+    retained = source()
+    calls = []
+
+    def stream_chat(prompt, *, timeout):
+        calls.append((prompt, timeout))
+        return retained
+
+    monkeypatch.setattr(engine, "stream_chat", stream_chat)
+    try:
+        assert [event async for event in driver.stream_reply_events("hi", timeout=4)] == [
+            {"content": "正文"}
+        ]
+        assert finalized == [True]
+        assert reached_after_done == []
+        assert retained.ag_frame is None
+        assert calls == [("hi", 4)]
+    finally:
+        await retained.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_events_early_close_closes_retained_engine_generator(monkeypatch):
+    driver, _client, engine = make_driver()
+    finalized = []
+
+    async def source():
+        try:
+            yield {"type": "delta", "text": "第一段"}
+            yield {"type": "delta", "text": "后续"}
+        finally:
+            finalized.append(True)
+
+    retained = source()
+    monkeypatch.setattr(engine, "stream_chat", lambda *a, **kw: retained)
+    stream = driver.stream_reply_events("hi")
+    try:
+        assert await anext(stream) == {"content": "第一段"}
+        assert finalized == []
+        await stream.aclose()
+        assert finalized == [True]
+        assert retained.ag_frame is None
+    finally:
+        await stream.aclose()
+        await retained.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_events_cancellation_closes_retained_engine_generator(monkeypatch):
+    driver, _client, engine = make_driver()
+    waiting = asyncio.Event()
+    finalized = []
+
+    async def source():
+        try:
+            waiting.set()
+            await asyncio.Event().wait()
+            yield {"type": "done"}
+        finally:
+            finalized.append(True)
+
+    retained = source()
+    monkeypatch.setattr(engine, "stream_chat", lambda *a, **kw: retained)
+    stream = driver.stream_reply_events("hi")
+    pending = asyncio.create_task(anext(stream))
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert finalized == [True]
+        assert retained.ag_frame is None
+    finally:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await stream.aclose()
+        await retained.aclose()
+
+
+@pytest.mark.asyncio
+async def test_string_projection_early_close_closes_retained_events(monkeypatch):
+    """Retain the event generator separately so GC cannot mask missing aclose."""
+    driver, _client, _engine = make_driver()
+    finalized = []
+
+    async def source():
+        try:
+            yield {"content": "第一段"}
+            yield {"content": "后续"}
+        finally:
+            finalized.append(True)
+
+    retained = source()
+    monkeypatch.setattr(driver, "stream_reply_events", lambda *a, **kw: retained)
+    stream = driver.stream_reply("hi")
+    try:
+        assert await anext(stream) == "第一段"
+        assert finalized == []
+        await stream.aclose()
+        assert finalized == [True]
+        assert retained.ag_frame is None
+    finally:
+        await stream.aclose()
+        await retained.aclose()
+
+
+@pytest.mark.asyncio
+async def test_string_projection_cancellation_closes_retained_events(monkeypatch):
+    driver, _client, _engine = make_driver()
+    waiting = asyncio.Event()
+    finalized = []
+
+    async def source():
+        try:
+            yield {"content": "第一段"}
+            waiting.set()
+            await asyncio.Event().wait()
+            yield {"content": "后续"}
+        finally:
+            finalized.append(True)
+
+    retained = source()
+    monkeypatch.setattr(driver, "stream_reply_events", lambda *a, **kw: retained)
+    stream = driver.stream_reply("hi")
+    pending = None
+    try:
+        assert await anext(stream) == "第一段"
+        pending = asyncio.create_task(anext(stream))
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert finalized == [True]
+        assert retained.ag_frame is None
+    finally:
+        if pending is not None:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        await stream.aclose()
+        await retained.aclose()
 
 
 @pytest.mark.asyncio

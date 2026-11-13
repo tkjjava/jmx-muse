@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 import json
@@ -82,6 +83,15 @@ def accepts_kwarg(fn: object, name: str) -> bool:
     if name in params:
         return True
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+async def _close_stream(stream: AsyncIterator[Any]) -> None:
+    """Close owned generators while accepting plain AsyncIterator clients."""
+    close = getattr(stream, "aclose", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 def stream_idle_timeout() -> float | None:
@@ -654,8 +664,12 @@ class ProtocolEngine:
         self, prompt: str, *, timeout: float = 300.0
     ) -> AsyncIterator[dict[str, Any]]:
         """{"type":"delta"|"media"|"done"|"refused"} 事件流。"""
-        async for event in self._run(prompt, expect=None, timeout=timeout):
-            yield event
+        stream = self._run(prompt, expect=None, timeout=timeout)
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await _close_stream(stream)
 
     async def collect_chat(
         self, prompt: str, *, timeout: float = 300.0
@@ -879,6 +893,27 @@ class ProtocolEngine:
         timeout: float,
         on_progress: Callable[[int], None] | None,
     ) -> GenerationResult:
+        # This coroutine never yields to a consumer: its full lifetime can safely
+        # own cancellation, including staging, prefetch and the final file fetch.
+        try:
+            async with asyncio.timeout(timeout):
+                return await self._generate_with_budget(
+                    prompt, expect=expect, references=references,
+                    timeout=timeout, on_progress=on_progress,
+                )
+        except TimeoutError as exc:
+            raise ProtocolGenerationError("纯协议生成超时，未收到完整结果") from exc
+
+    async def _generate_with_budget(
+        self,
+        prompt: str,
+        *,
+        expect: str,
+        references: list[str] | None,
+        timeout: float,
+        on_progress: Callable[[int], None] | None,
+    ) -> GenerationResult:
+        started = self._monotonic()
         if expect not in ("image", "video"):
             raise ProtocolGenerationError(f"不支持的生成类型：{expect}")
         if not (prompt or "").strip():
@@ -888,7 +923,7 @@ class ProtocolEngine:
         text_parts: list[str] = []
         seen: set[Any] = set()
         done_at: float | None = None
-        started = self._monotonic()
+        grace_expired = False
         fired: set[int] = set()
         node_id = self._node_id()
 
@@ -909,70 +944,95 @@ class ProtocolEngine:
         stream = self.client.read_stream(  # type: ignore[attr-defined]
             prompt, staged, node_id=node_id, timeout=timeout, **self._stream_extras()
         )
-        await self._prefetch_media(node_id, candidates)
-        async for raw in stream:
-            if self._monotonic() - started > timeout:
-                raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("type") == "pool_error":
-                raise ProtocolGenerationError("Noise 连接已断开，请重试")
-            sequence = raw.get("seq")
-            if sequence is not None:
-                if sequence in seen:
+        try:
+            await self._prefetch_media(node_id, candidates)
+            iterator = aiter(stream)
+            while True:
+                now = self._monotonic()
+                remaining = timeout - (now - started)
+                grace_remaining = (self.grace_seconds - (now - done_at)
+                                   if done_at is not None else None)
+                if remaining <= 0:
+                    raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
+                if grace_remaining is not None and grace_remaining <= 0:
+                    grace_expired = True
+                    break
+                wait_budget = (min(remaining, grace_remaining)
+                               if grace_remaining is not None else remaining)
+                try:
+                    async with asyncio.timeout(wait_budget) as wait_timeout:
+                        raw = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
+                    if (wait_timeout.expired() and grace_remaining is not None
+                            and grace_remaining <= remaining):
+                        grace_expired = True
+                        break
+                    raise
+                if self._monotonic() - started > timeout:
+                    raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
+                if not isinstance(raw, dict):
                     continue
-                seen.add(sequence)
-            name = raw.get("event") or raw.get("type")
-            payload = raw.get("payload")
-            if name == "res" or not isinstance(payload, dict):
-                continue
-            device = (payload.get("chat_context") or {}).get("device_id") \
-                if isinstance(payload.get("chat_context"), dict) else None
-            ours = device is None or str(device) == node_id
+                if raw.get("type") == "pool_error":
+                    raise ProtocolGenerationError("Noise 连接已断开，请重试")
+                sequence = raw.get("seq")
+                if sequence is not None:
+                    if sequence in seen:
+                        continue
+                    seen.add(sequence)
+                name = raw.get("event") or raw.get("type")
+                payload = raw.get("payload")
+                if name == "res" or not isinstance(payload, dict):
+                    continue
+                device = (payload.get("chat_context") or {}).get("device_id") \
+                    if isinstance(payload.get("chat_context"), dict) else None
+                ours = device is None or str(device) == node_id
 
-            if name == "delta.text_append" and ours:
-                progress(MILESTONES[0])
-                delta = str(payload.get("text") or "")
-                if delta:
-                    text_parts.append(delta)
-                    progress(40)
-                    if QUOTA_TEXT_RE.search(delta):
-                        raise ProtocolQuotaExhausted(f"账号额度不足：{delta[:120]}")
-            if name in (
-                "delta.presentation",
-                "delta.message_done",
-                "delta.tool_done",
-                "delta.placeholder",
-            ):
-                before = len(candidates)
-                collect_media(payload, candidates)
-                if len(candidates) > before:
-                    progress(50)
-            if name == "delta.message_done":
-                status = payload.get("status")
-                transcript = payload.get("transcript")
-                text = self._transcript_text(transcript)
-                if ours and status not in (None, "completed"):
-                    reason = text or str(status)
-                    if QUOTA_TEXT_RE.search(reason):
-                        raise ProtocolQuotaExhausted(f"账号额度不足：{reason[:120]}")
-                    raise ProtocolModelRefusal(f"模型未生成媒体，仅返回文本: {reason[:240]}")
-                if ours and not text_parts and text:
-                    text_parts.append(text)
-                if done_at is None:
-                    done_at = self._monotonic()
-                    progress(75)
-            if name == "delta.message_removed" and ours:
-                raise ProtocolModelRefusal("Muse 在完成前移除了这次生成")
+                if name == "delta.text_append" and ours:
+                    progress(MILESTONES[0])
+                    delta = str(payload.get("text") or "")
+                    if delta:
+                        text_parts.append(delta)
+                        progress(40)
+                        if QUOTA_TEXT_RE.search(delta):
+                            raise ProtocolQuotaExhausted(f"账号额度不足：{delta[:120]}")
+                if name in (
+                    "delta.presentation",
+                    "delta.message_done",
+                    "delta.tool_done",
+                    "delta.placeholder",
+                ) and ours:
+                    before = len(candidates)
+                    collect_media(payload, candidates)
+                    if len(candidates) > before:
+                        progress(50)
+                if name == "delta.message_done" and ours:
+                    status = payload.get("status")
+                    transcript = payload.get("transcript")
+                    text = self._transcript_text(transcript)
+                    if status not in (None, "completed"):
+                        reason = text or str(status)
+                        if QUOTA_TEXT_RE.search(reason):
+                            raise ProtocolQuotaExhausted(f"账号额度不足：{reason[:120]}")
+                        raise ProtocolModelRefusal(f"模型未生成媒体，仅返回文本: {reason[:240]}")
+                    if not text_parts and text:
+                        text_parts.append(text)
+                    if done_at is None:
+                        done_at = self._monotonic()
+                        progress(75)
+                if name == "delta.message_removed" and ours:
+                    raise ProtocolModelRefusal("Muse 在完成前移除了这次生成")
 
-            if done_at is not None:
-                # 真实 read_stream 是长连接，`async for` 永不结束；裁决必须在流内做，
-                # 否则要等满整个 timeout 才有返回（或永远返回不了）。成品已到就走，
-                # 宽限期满也走——交给下面的统一裁决分"模态不符"还是"没成品"。
-                if matching(expect):
-                    break
-                if self._monotonic() - done_at >= self.grace_seconds:
-                    break
+                if done_at is not None:
+                    # Completed media is final; otherwise wait only the smaller
+                    # of the remaining absolute budget and the late-media grace.
+                    if matching(expect):
+                        break
+                    if self._monotonic() - done_at >= self.grace_seconds:
+                        break
+        finally:
+            await _close_stream(stream)
 
         wanted = matching(expect)
         if wanted:
@@ -991,7 +1051,9 @@ class ProtocolEngine:
                 source_prompt=prompt,
                 path=item.path,
             )
-        if done_at is not None and self._monotonic() - done_at >= self.grace_seconds:
+        if done_at is not None and (
+            grace_expired or self._monotonic() - done_at >= self.grace_seconds
+        ):
             # 上游 :498-499 只抛通用错误；这里区分「只拿到封面/别的模态」与「什么都没拿到」，
             # 让调用方能分辨要不要换号（模态不符可换，纯无成品也可换，但语义要写清）。
             strays = [item for item in candidates if item.path not in self.upload_refs]
@@ -1018,69 +1080,79 @@ class ProtocolEngine:
         stream = self.client.read_stream(  # type: ignore[attr-defined]
             prompt, [], node_id=node_id, timeout=timeout, **self._stream_extras()
         )
-        async for raw in stream:
-            if self._monotonic() - started > timeout:
-                raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("type") == "pool_error":
-                raise ProtocolGenerationError("Noise 连接已断开，请重试")
-            sequence = raw.get("seq")
-            if sequence is not None:
-                if sequence in seen:
+        try:
+            iterator = aiter(stream)
+            while True:
+                remaining = timeout - (self._monotonic() - started)
+                if remaining <= 0:
+                    raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
+                try:
+                    # Never leave a timeout active across yield: cancellation
+                    # belongs only to our upstream wait, not the consumer's work.
+                    async with asyncio.timeout(remaining):
+                        raw = await anext(iterator)
+                except StopAsyncIteration:
+                    break
+                except TimeoutError as exc:
+                    raise ProtocolGenerationError("纯协议生成超时，未收到完整结果") from exc
+                if self._monotonic() - started > timeout:
+                    raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
+                if not isinstance(raw, dict):
                     continue
-                seen.add(sequence)
-            name = raw.get("event") or raw.get("type")
-            payload = raw.get("payload")
-            if name == "res" or not isinstance(payload, dict):
-                continue
-            device = (payload.get("chat_context") or {}).get("device_id") \
-                if isinstance(payload.get("chat_context"), dict) else None
-            ours = device is None or str(device) == node_id
+                if raw.get("type") == "pool_error":
+                    raise ProtocolGenerationError("Noise 连接已断开，请重试")
+                sequence = raw.get("seq")
+                if sequence is not None:
+                    if sequence in seen:
+                        continue
+                    seen.add(sequence)
+                name = raw.get("event") or raw.get("type")
+                payload = raw.get("payload")
+                if name == "res" or not isinstance(payload, dict):
+                    continue
+                device = (payload.get("chat_context") or {}).get("device_id") \
+                    if isinstance(payload.get("chat_context"), dict) else None
+                ours = device is None or str(device) == node_id
 
-            if name == "delta.text_append" and ours:
-                delta = str(payload.get("text") or "")
-                if delta:
-                    text_parts.append(delta)
-                    if QUOTA_TEXT_RE.search(delta):
-                        raise ProtocolQuotaExhausted(f"账号额度不足：{delta[:120]}")
-                    yield {"type": "delta", "text": delta}
-            if name in (
-                "delta.presentation",
-                "delta.message_done",
-                "delta.tool_done",
-                "delta.placeholder",
-            ) and ours:
-                # `ours` 必须在这里也判一次（2026-11-11 补的归属缺口）：
-                # 正文那条分支本来就有它，媒体这条**没有**，于是同一条订阅上
-                # 别的会话的 presentation/tool_done 会被当成这回合的成品取回来。
-                # 真机上表现为"问了 A，回来的附件属于上一个请求"。
-                before = len(candidates)
-                collect_media(payload, candidates)
-                for item in candidates[before:]:
-                    yield {"type": "media", "ref": item.to_event()}
-            if name == "delta.message_done":
-                status = payload.get("status")
-                transcript = payload.get("transcript")
-                text = self._transcript_text(transcript)
-                if ours and status not in (None, "completed"):
-                    refused = text or "".join(text_parts) or str(status)
-                else:
-                    if ours and not text_parts and text:
+                if name == "delta.text_append" and ours:
+                    delta = str(payload.get("text") or "")
+                    if delta:
+                        text_parts.append(delta)
+                        if QUOTA_TEXT_RE.search(delta):
+                            raise ProtocolQuotaExhausted(f"账号额度不足：{delta[:120]}")
+                        yield {"type": "delta", "text": delta}
+                if name in (
+                    "delta.presentation",
+                    "delta.message_done",
+                    "delta.tool_done",
+                    "delta.placeholder",
+                ) and ours:
+                    # Media is subject to the same turn-ownership check as text.
+                    before = len(candidates)
+                    collect_media(payload, candidates)
+                    for item in candidates[before:]:
+                        yield {"type": "media", "ref": item.to_event()}
+                if name == "delta.message_done" and ours:
+                    status = payload.get("status")
+                    transcript = payload.get("transcript")
+                    text = self._transcript_text(transcript)
+                    if status not in (None, "completed"):
+                        refused = text or "".join(text_parts) or str(status)
+                    elif not text_parts and text:
                         text_parts.append(text)
                         yield {"type": "delta", "text": text}
-                done = True
-            if name == "delta.message_removed" and ours:
-                raise ProtocolModelRefusal("Muse 在完成前移除了这次生成")
+                    done = True
+                    break
+                if name == "delta.message_removed" and ours:
+                    raise ProtocolModelRefusal("Muse 在完成前移除了这次生成")
+        finally:
+            await _close_stream(stream)
         if not done:
             elapsed = self._monotonic() - started
-            # 客户端 read_stream 在**回合结束**时也会直接 return：真机序列里
-            # 没有 delta.message_done，收尾靠 agent.status 回到 online（见
-            # protocol_client._turn_ended）。所以"流自己结束"不等于失败：
-            # 只要已经收到正文、且不是 deadline 到点，就按完成收尾。
-            # 2026-11-11 活网实证：13+13 的回答在 2 条 delta.text_append 之后
-            # 流就结束了，旧代码在这里抛"未收到完整结果"，把一次成功回答变成报错。
-            if text_parts and elapsed < timeout:
+            # A finite stream can end through disconnect/idle timeout just as it
+            # can through agent.status. Only the client's recognized terminal
+            # signal confirms the latter; partial text is never proof of success.
+            if getattr(self.client, "_turn_complete", False) is True and elapsed < timeout:
                 done = True
             else:
                 raise ProtocolGenerationError(

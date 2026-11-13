@@ -108,12 +108,15 @@ class FakeEngineClient:
         files=None,
         routes=None,
         async_media=False,
+        turn_complete=False,
     ) -> None:
         self.events = list(events)
         self.media = list(media or [])
         self.files = dict(files or {})
         self.routes = dict(routes or {})
         self.async_media = async_media
+        self.turn_complete = turn_complete
+        self._turn_complete = False
         self.read_calls = []
         self.write_calls = []
         self.read_file_calls = []
@@ -130,6 +133,7 @@ class FakeEngineClient:
         return self.routes.get((method, path), {"result": {}})
 
     async def read_stream(self, prompt=None, references=None, *, node_id=None, timeout=None):
+        self._turn_complete = False
         self.read_calls.append(
             {
                 "prompt": prompt,
@@ -143,6 +147,7 @@ class FakeEngineClient:
                 item()
                 continue
             yield item
+        self._turn_complete = self.turn_complete
 
     async def fs_write(self, data, mime, filename):
         self.write_calls.append((bytes(data), mime, filename))
@@ -986,6 +991,44 @@ async def test_foreign_device_media_is_ignored():
     assert [item["path"] for item in media] == ["sandbox://workspace/gen/mine.png"]
 
 
+@pytest.mark.parametrize("event_name", [
+    "delta.presentation", "delta.message_done", "delta.tool_done", "delta.placeholder",
+])
+async def test_generate_does_not_fetch_foreign_device_media(event_name):
+    foreign = image_event(1, path="workspace/gen/foreign.png")
+    foreign["event"] = event_name
+    foreign["payload"]["chat_context"] = {"device_id": "other"}
+    foreign["payload"]["status"] = "completed"
+    clock = FakeClock()
+    client = FakeEngineClient([
+        foreign,
+        done_event(2),
+        lambda: clock.advance(13),
+        {"event": "delta.text_append", "seq": 3, "payload": {"text": "no artifact"}},
+    ], files={"sandbox://workspace/gen/foreign.png": PNG})
+    engine, _ = make_engine(client, clock)
+    with pytest.raises(ProtocolGenerationError, match="未收到 image 成品"):
+        await engine.generate_image("mine")
+    assert client.read_file_calls == []
+
+
+async def test_foreign_done_cannot_start_generation_grace_timer():
+    clock = FakeClock()
+    foreign = done_event(1)
+    foreign["payload"]["chat_context"] = {"device_id": "other"}
+    client = FakeEngineClient([
+        foreign,
+        lambda: clock.advance(13),
+        {"event": "delta.text_append", "seq": 2, "payload": {"text": "still generating"}},
+        image_event(3),
+        done_event(4),
+    ], files={IMAGE_PATH: PNG})
+    engine, _ = make_engine(client, clock)
+    result = await engine.generate_image("mine")
+    assert result.data == PNG
+    assert client.read_file_calls == [IMAGE_PATH]
+
+
 async def test_generate_times_out_while_stream_keeps_talking():
     """超过 timeout 还在来事件 → 必须主动失败，不能继续等到天荒地老。"""
     clock = FakeClock()
@@ -1060,20 +1103,55 @@ async def test_stream_chat_surfaces_refusal_then_raises():
     assert seen[-1]["text"] == "不生成"
 
 
-async def test_chat_stream_ending_after_text_is_complete_without_message_done():
-    """真机序列没有 delta.message_done：流按 agent.status 收尾后必须算完成。
-
-    2026-11-11 活网：13+13 的回答只有 2 条 delta.text_append，之后订阅流自己
-    结束（客户端 `_turn_ended` 命中 agent.status 回到 online）。旧实现把"流结束
-    但没见到 message_done"一律判超时，把一次成功回答变成报错；这条钉住修复。
-    """
-    engine = ProtocolEngine(
-        FakeEngineClient([{"event": "delta.text_append", "seq": 1, "payload": {"text": "a"}}])
+async def test_chat_client_confirmed_terminal_can_complete_without_message_done():
+    """agent.status completion is explicit client state, not inferred from EOF."""
+    client = FakeEngineClient(
+        [{"event": "delta.text_append", "seq": 1, "payload": {"text": "a"}}],
+        turn_complete=True,
     )
+    engine = ProtocolEngine(client)
     events = [event async for event in engine.stream_chat("hi")]
     assert [event["type"] for event in events] == ["delta", "done"]
-    assert events[0]["text"] == "a"
     assert events[-1]["text"] == "a"
+
+
+async def test_chat_incomplete_eof_preserves_partial_delta_but_never_emits_done():
+    client = FakeEngineClient(
+        [{"event": "delta.text_append", "seq": 1, "payload": {"text": "partial"}}]
+    )
+    events = []
+    with pytest.raises(ProtocolGenerationError, match="未收到完整结果"):
+        async for event in ProtocolEngine(client).stream_chat("hi"):
+            events.append(event)
+    assert events == [{"type": "delta", "text": "partial"}]
+
+
+async def test_chat_completion_state_is_reset_for_next_incomplete_stream():
+    client = FakeEngineClient(
+        [{"event": "delta.text_append", "seq": 1, "payload": {"text": "first"}}],
+        turn_complete=True,
+    )
+    engine = ProtocolEngine(client)
+    assert (await engine.collect_chat("first"))[0] == "first"
+    client.events = [{"event": "delta.text_append", "seq": 2, "payload": {"text": "second"}}]
+    client.turn_complete = False
+    with pytest.raises(ProtocolGenerationError, match="未收到完整结果"):
+        await engine.collect_chat("second")
+
+
+@pytest.mark.parametrize("status", ["completed", "refused"])
+async def test_foreign_done_does_not_complete_partial_chat(status):
+    foreign_done = done_event(2, status=status, transcript=transcript_text("foreign"))
+    foreign_done["payload"]["chat_context"] = {"device_id": "other"}
+    client = FakeEngineClient([
+        {"event": "delta.text_append", "seq": 1, "payload": {"text": "mine"}},
+        foreign_done,
+    ])
+    events = []
+    with pytest.raises(ProtocolGenerationError, match="未收到完整结果"):
+        async for event in ProtocolEngine(client).stream_chat("hi"):
+            events.append(event)
+    assert events == [{"type": "delta", "text": "mine"}]
 
 
 async def test_chat_stream_ending_without_any_text_is_still_an_error():

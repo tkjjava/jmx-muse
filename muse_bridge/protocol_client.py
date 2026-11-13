@@ -732,6 +732,8 @@ class HatchProtocolClient:
         self._stream_limits: dict[int, int] = {}
         # 最近一次 read_stream 是否因为"连续无新字节"而收尾（排障用，不是契约）。
         self._idle_timeout_hit = False
+        # True only for an observed, owned terminal event; plain EOF is not success.
+        self._turn_complete = False
 
         # ---- 断线重连 / 订阅 resume（0.4.x，离线实现；真机未验收）----
         # 预算按"每个 read_stream 回合"重置（见 read_stream），连续抖动仍受上限
@@ -1147,7 +1149,11 @@ class HatchProtocolClient:
         except TimeoutError:
             pass
         finally:
-            self.waiters.get(stream_id, set()).discard(waiter)
+            waiters = self.waiters.get(stream_id)
+            if waiters is not None:
+                waiters.discard(waiter)
+                if not waiters:
+                    self.waiters.pop(stream_id, None)
 
     async def _wait_end(self, stream_id: int, timeout: float) -> ProtocolResponse:
         deadline = time.monotonic() + timeout
@@ -1157,6 +1163,8 @@ class HatchProtocolClient:
                 raise ProtocolError(f"stream {stream_id} 的响应已被丢弃")
             if response.ended or response.reset is not None:
                 return response
+            if self._disconnect_reason is not None:
+                raise ProtocolError(self._disconnect_reason)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProtocolError(f"等待 stream {stream_id} 结束超时")
@@ -1170,6 +1178,8 @@ class HatchProtocolClient:
                 raise ProtocolError(f"stream {stream_id} 的响应已被丢弃")
             if response.status is not None or response.ended or response.reset:
                 return response
+            if self._disconnect_reason is not None:
+                raise ProtocolError(self._disconnect_reason)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProtocolError(f"等待 stream {stream_id} 响应头超时")
@@ -1227,7 +1237,12 @@ class HatchProtocolClient:
                 inner = ServiceResponse.decode(raw).payload
                 service_frame = ServiceFrame.decode(inner)
                 stream_id = int(service_frame.stream_id)
-                response = self.responses.setdefault(stream_id, ProtocolResponse())
+                response = self.responses.get(stream_id)
+                # HTTP-over-Noise responses must belong to a locally opened stream.
+                # Late/unknown frames still advance the receive cipher, but must not
+                # resurrect timed-out streams or allocate unbounded response buffers.
+                if response is None or response.ended:
+                    continue
                 kind = self._frame_kind(service_frame)
                 if kind == "response":
                     payload = service_frame.response
@@ -1237,12 +1252,12 @@ class HatchProtocolClient:
                             (item.key, item.value) for item in payload.headers
                         ]
                         self._append_body(stream_id, response, bytes(payload.body))
-                        response.ended = bool(payload.end_body)
+                        response.ended = response.ended or bool(payload.end_body)
                 elif kind == "body_chunk":
                     chunk = service_frame.body_chunk
                     if chunk is not None:
                         self._append_body(stream_id, response, bytes(chunk.data))
-                        response.ended = bool(chunk.end_body)
+                        response.ended = response.ended or bool(chunk.end_body)
                 elif kind == "reset":
                     reset = service_frame.reset
                     response.reset = {
@@ -1351,8 +1366,20 @@ class HatchProtocolClient:
             service = ServiceRequest(
                 service=ServiceType.DAEMON, payload=frame.encode()
             )
-            for encrypted in self._pack(service):
-                await self._ws_send(encrypted)
+            try:
+                if self._disconnect_reason is not None:
+                    raise ProtocolError("Noise 连接已失效，需重新握手")
+                # _pack consumes cipher nonces before network writes. If a write
+                # fails or is cancelled, delivery is ambiguous: never replay here.
+                for encrypted in self._pack(service):
+                    await self._ws_send(encrypted)
+            except BaseException:
+                self.responses.pop(stream_id, None)
+                self._stream_limits.pop(stream_id, None)
+                self._disconnect_reason = "Noise 发送中断，需重新握手"
+                self._handshake_done = False
+                self._fail_waiters(ProtocolError(self._disconnect_reason))
+                raise
             return stream_id
 
     async def request(
@@ -1385,6 +1412,9 @@ class HatchProtocolClient:
         )
         try:
             response = await self._wait_end(stream_id, budget)
+        except BaseException:
+            self.responses.pop(stream_id, None)
+            raise
         finally:
             if end_body:
                 self._stream_limits.pop(stream_id, None)
@@ -1506,7 +1536,7 @@ class HatchProtocolClient:
         stream_id = await self._send("POST", "/chat/subscribe", body, end_body=True)
         try:
             headers = await self._wait_headers(stream_id, 30.0)
-        except ProtocolError:
+        except BaseException:
             self.responses.pop(stream_id, None)
             raise
         if headers.status != 200:
@@ -1729,6 +1759,7 @@ class HatchProtocolClient:
         # 一直抖的连接最终会撞上限抛错，而不是无限循环。
         self._reconnect_count = 0
         self._idle_timeout_hit = False
+        self._turn_complete = False
         if prompt is not None:
             target = node_id or self.node_id
             # 已存在的订阅才需要"只看本轮增量"：长连接跨回合，上一回合没消费完的
@@ -1820,10 +1851,17 @@ class HatchProtocolClient:
                             # 服务端把已消费的事件又发了一遍（或按包含游标重放）：
                             # 本地挡住 —— 正文/状态都不会重复。
                             continue
-                    if self._decorate_event(event):
+                    payload = event.get("payload")
+                    context = payload.get("chat_context") if isinstance(payload, Mapping) else None
+                    device = context.get("device_id") if isinstance(context, Mapping) else None
+                    ours = device is None or str(device) == (node_id or self.node_id)
+                    if self._decorate_event(event) and ours:
                         saw_text = True
+                    reason = self._turn_ended(event, saw_text) if ours else None
+                    # Set before yielding: a consumer may stop at this event.
+                    if reason is not None:
+                        self._turn_complete = True
                     yield event
-                    reason = self._turn_ended(event, saw_text)
                     if reason is not None:
                         return
                 self._scan_offset = cut + 1
@@ -1915,8 +1953,8 @@ class HatchProtocolClient:
           1. 必须**已经收到过正文**。实测 `agent.status(online)` 与
              `task.status(completed)` 会在 `message.user` / 正文**之前**出现，
              只看状态就会在开头立刻把流关掉、把回答丢掉。
-          2. `agent.status` 的 `activity_code` 不再是 working/responding
-             （回到 online/idle）—— 正文之后最稳定的收尾。
+          2. `agent.status` 的 `activity_code` 明确回到 online/idle
+             —— 空值或未知状态不能作为正常完成的证据。
           3. `task.status` 的 `status` 回到 completed。
           4. `delta.message_done` —— 旧模型假设里唯一的结束信号，真机序列没出现；
              保留它是因为老路径与引擎契约还指望它（收到正文后仍按它收尾）。
@@ -1931,8 +1969,8 @@ class HatchProtocolClient:
             return None
         if name == "agent.status":
             code = str(payload.get("activity_code") or "").strip().lower()
-            if code not in ("working", "responding"):
-                return f"agent.status:{code or '空'}"
+            if code in ("online", "idle"):
+                return f"agent.status:{code}"
         elif name == "task.status":
             status = str(payload.get("status") or "").strip().lower()
             if status == "completed":

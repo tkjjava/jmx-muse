@@ -230,78 +230,79 @@ class ProtocolDriver:
         await self.connect()
         deadline = asyncio.get_running_loop().time() + timeout
         seen_paths: set[str] = set()
-        async for event in self._engine.stream_chat(prompt, timeout=timeout):
-            kind = str(event.get("type") or "")
-            if kind == "delta":
-                text = event.get("text")
-                if text:
-                    yield {"content": str(text)}
-                continue
-            if kind == "media":
-                ref = event.get("ref")
-                if not isinstance(ref, dict):
-                    raise ProtocolGenerationError("聊天媒体引用无效")
-                normalized = normalize_media_path(ref.get("path"))
-                if normalized is None:
-                    raise ProtocolGenerationError("聊天媒体路径不是受支持的 sandbox 路径")
-                path, remote = normalized
-                if (
-                    not remote.startswith("workspace/")
-                    or any(part in (".", "..") for part in remote.split("/"))
-                    or any(char in remote for char in ("\\", "?", "#"))
-                ):
-                    raise ProtocolGenerationError("聊天媒体路径不是受支持的 sandbox 路径")
-                if path in seen_paths:
+        async with contextlib.aclosing(self._engine.stream_chat(prompt, timeout=timeout)) as events:
+            async for event in events:
+                kind = str(event.get("type") or "")
+                if kind == "delta":
+                    text = event.get("text")
+                    if text:
+                        yield {"content": str(text)}
                     continue
-                item = MediaResource(
-                    path=path,
-                    mime=str(ref.get("mime") or ""),
-                    kind=str(ref.get("kind") or ""),
-                    width=ref.get("width"),
-                    height=ref.get("height"),
-                    duration_ms=ref.get("duration_ms"),
-                    seed=ref.get("seed"),
-                    raw={**ref, "path": path},
-                )
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise ProtocolGenerationError("聊天媒体获取超时")
-                try:
-                    with observability.timed("chat_media_fetch"):
-                        data = await asyncio.wait_for(
-                            self._engine._fetch_bytes(item), timeout=remaining
-                        )
-                except TimeoutError as exc:
-                    observability.bump("chat_media_fetch_failed")
-                    raise ProtocolGenerationError("聊天媒体获取超时") from exc
-                if not isinstance(data, (bytes, bytearray)) or not data:
-                    observability.bump("chat_media_fetch_failed")
-                    raise ProtocolGenerationError("聊天媒体获取失败：未返回非空字节")
-                # File signatures take precedence over untrusted declared MIME. An
-                # HTML/error body carrying image/png must not become an attachment.
-                mime = refs.normalize_mime(refs.sniff_mime(data) or "")
-                if mime not in refs.REFERENCE_MIME_EXT:
-                    observability.bump("chat_media_fetch_failed")
-                    raise ProtocolGenerationError("聊天媒体 MIME 无效或无法识别")
-                with observability.timed("chat_media_store"):
-                    stored = media.MediaStore().save(data, mime, refs.reference_kind(mime))
-                observability.bump("chat_media_stored")
-                metadata = stored.to_dict()
-                metadata.update(
-                    width=item.width,
-                    height=item.height,
-                    duration_ms=item.duration_ms,
-                    seed=item.seed,
-                    via="protocol",
-                )
-                seen_paths.add(path)
-                self.chat_media.append(metadata)
-                yield {"media": [metadata]}
-                continue
-            if kind == "done":
-                return
-            if kind == "refused":
-                raise ProtocolRefusal(str(event.get("text") or ""))
+                if kind == "media":
+                    ref = event.get("ref")
+                    if not isinstance(ref, dict):
+                        raise ProtocolGenerationError("聊天媒体引用无效")
+                    normalized = normalize_media_path(ref.get("path"))
+                    if normalized is None:
+                        raise ProtocolGenerationError("聊天媒体路径不是受支持的 sandbox 路径")
+                    path, remote = normalized
+                    if (
+                        not remote.startswith("workspace/")
+                        or any(part in (".", "..") for part in remote.split("/"))
+                        or any(char in remote for char in ("\\", "?", "#"))
+                    ):
+                        raise ProtocolGenerationError("聊天媒体路径不是受支持的 sandbox 路径")
+                    if path in seen_paths:
+                        continue
+                    item = MediaResource(
+                        path=path,
+                        mime=str(ref.get("mime") or ""),
+                        kind=str(ref.get("kind") or ""),
+                        width=ref.get("width"),
+                        height=ref.get("height"),
+                        duration_ms=ref.get("duration_ms"),
+                        seed=ref.get("seed"),
+                        raw={**ref, "path": path},
+                    )
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise ProtocolGenerationError("聊天媒体获取超时")
+                    try:
+                        with observability.timed("chat_media_fetch"):
+                            data = await asyncio.wait_for(
+                                self._engine._fetch_bytes(item), timeout=remaining
+                            )
+                    except TimeoutError as exc:
+                        observability.bump("chat_media_fetch_failed")
+                        raise ProtocolGenerationError("聊天媒体获取超时") from exc
+                    if not isinstance(data, (bytes, bytearray)) or not data:
+                        observability.bump("chat_media_fetch_failed")
+                        raise ProtocolGenerationError("聊天媒体获取失败：未返回非空字节")
+                    # File signatures take precedence over untrusted declared MIME. An
+                    # HTML/error body carrying image/png must not become an attachment.
+                    mime = refs.normalize_mime(refs.sniff_mime(data) or "")
+                    if mime not in refs.REFERENCE_MIME_EXT:
+                        observability.bump("chat_media_fetch_failed")
+                        raise ProtocolGenerationError("聊天媒体 MIME 无效或无法识别")
+                    with observability.timed("chat_media_store"):
+                        stored = media.MediaStore().save(data, mime, refs.reference_kind(mime))
+                    observability.bump("chat_media_stored")
+                    metadata = stored.to_dict()
+                    metadata.update(
+                        width=item.width,
+                        height=item.height,
+                        duration_ms=item.duration_ms,
+                        seed=item.seed,
+                        via="protocol",
+                    )
+                    seen_paths.add(path)
+                    self.chat_media.append(metadata)
+                    yield {"media": [metadata]}
+                    continue
+                if kind == "done":
+                    return
+                if kind == "refused":
+                    raise ProtocolRefusal(str(event.get("text") or ""))
         # 走到这里说明引擎流结束时既没给 done 也没给 refused。引擎的 `_run`
         # 在"没等到回合结束"时会自己抛错，所以本路径只可能是引擎语义变了；
         # 静默 return 会把半句话当成完整回答（上层报 finish_reason=stop），
@@ -318,10 +319,13 @@ class ProtocolDriver:
         → `driver.stream_reply`。缺这个方法，协议驱动上所有非流式请求都会
         AttributeError，而 `app.py` 不在本轮可改范围。实现就是事件接口的投影。
         """
-        async for event in self.stream_reply_events(prompt, timeout=timeout):
-            text = event.get("content")
-            if text:
-                yield text
+        async with contextlib.aclosing(
+            self.stream_reply_events(prompt, timeout=timeout)
+        ) as events:
+            async for event in events:
+                text = event.get("content")
+                if text:
+                    yield text
 
     async def collect_reply(self, prompt: str, *, timeout: float = 180.0) -> str:
         """Collect text through the same attachment delivery path as streaming."""
