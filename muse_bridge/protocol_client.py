@@ -1088,12 +1088,23 @@ class HatchProtocolClient:
         except ProtocolError:
             raise
         except Exception as exc:
+            # Only accept typed numeric metadata, never stringify a response or
+            # exception: upgrade headers/URLs may contain authentication tokens.
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            if type(status) is not int:
+                status = getattr(exc, "status_code", None)
+            detail = f" HTTP {status}" if type(status) is int and 100 <= status <= 599 else ""
             raise ProtocolError(
-                f"Noise WebSocket 连接失败（{type(exc).__name__}）"
+                f"Noise WebSocket 连接失败（{type(exc).__name__}{detail}）"
             ) from None
         try:
             await self._noise_handshake(vm_type)
-        except Exception:
+        except BaseException:
+            # asyncio.CancelledError is not an Exception. A deadline/caller cancel
+            # during msg1/msg2/msg3 must retire this partial cryptographic session.
+            self._handshake_done = False
+            self.send_cipher = self.recv_cipher = None
             await self._teardown_ws()
             raise
 

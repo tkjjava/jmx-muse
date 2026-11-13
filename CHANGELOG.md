@@ -1,3 +1,12 @@
+## 2026-11-13 — Upgrade 故障定位与握手取消清理
+
+- WebSocket Upgrade 失败保留安全的数字 HTTP 状态码，兼容当前/旧版异常元数据，不输出原始异常或 token URL。
+- 握手取消也 teardown 半开 WS、清空密码状态；msg1/send、msg2/recv、msg3/send 三处栅栏验证。
+- 本轮两次活网均定位为 Upgrade HTTP 502，未进入 Noise 握手、未发送提问或取消；未判定具体网关/VM 根因。
+- 新增 10 条回归，全量 1771 passed，ruff 全绿；报告见 docs/2026-11-13_upgrade-diagnostics-report.md。
+
+---
+
 ## 2026-11-13 — 取消协议取证与订阅恢复修复
 
 - 从前端路由/调用/序列化链确认 POST /chat/cancel，主会话 JSON {}，thread 只带 session_id，不带 node_id。
