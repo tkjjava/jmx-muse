@@ -734,6 +734,8 @@ class HatchProtocolClient:
         self._idle_timeout_hit = False
         # True only for an observed, owned terminal event; plain EOF is not success.
         self._turn_complete = False
+        # Safe terminal category only; no payload, text or account identifiers.
+        self.turn_terminal_reason: str | None = None
 
         # ---- 断线重连 / 订阅 resume（0.4.x，离线实现；真机未验收）----
         # 预算按"每个 read_stream 回合"重置（见 read_stream），连续抖动仍受上限
@@ -1817,6 +1819,7 @@ class HatchProtocolClient:
         self._reconnect_count = 0
         self._idle_timeout_hit = False
         self._turn_complete = False
+        self.turn_terminal_reason = None
         # Keep the replay floor fixed at the last accepted cursor even when the
         # reconnect happens during preamble rather than inside the read loop.
         resume_floor = -1
@@ -1925,6 +1928,7 @@ class HatchProtocolClient:
                     # Set before yielding: a consumer may stop at this event.
                     if reason is not None:
                         self._turn_complete = True
+                        self.turn_terminal_reason = reason
                     yield event
                     if reason is not None:
                         return

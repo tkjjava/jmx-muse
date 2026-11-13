@@ -1,3 +1,21 @@
+## 2026-11-14 — 兜底 WS 帧边界与 `interrupted` 终态分类
+
+- 兜底客户端补齐 RFC6455 边界：客户端方向掩码校验、控制帧 FIN/≤125、保留位/操作码、
+  长度编码规范性与 64 位高位、分片消息累计上限、close 码/UTF-8 严格校验；close_timeout
+  实际生效，关闭开始后禁止新写入，取消时清理连接后再抛。
+- 兜底代理地址改为只接受无认证 HTTP CONNECT（支持 IPv6 方括号），拒绝 SOCKS/HTTPS/带
+  路径凭据的歧义输入；失败保留安全整数 status_code 与 stage，不回显状态行或令牌。
+- 引擎新增 `ProtocolInterrupted`：`delta.message_done.status="interrupted"` 是显式中止，
+  非模型拒绝、非可重试失败、非账号故障；聊天保留已发正文且不补 done，生成不取该事件媒体。
+- HTTP 映射 409 `protocol_interrupted` 且不降级账号状态；调度健康对该终态保持中性。
+- 区分"引擎总预算到期"与"上游操作自身超时"，后者不再误报为生成超时；客户端新增安全的
+  终态原因元数据（不含正文/凭据），每回合重置。
+- 新增 81 条回归，全量 1880 passed，ruff/差异检查通过。证据见
+  docs/2026-11-14_interrupted-terminal-report.md、docs/2026-11-14_proxy-boundaries-report.md。
+- 活网未观察到 interrupted，取消 ACK→实际停止的时序未验证；不宣称该链路已打通。
+
+---
+
 ## 2026-11-13 — 代理 WSS 兜底 TLS 与资源清理
 
 - 修复标准库兜底在 HTTP CONNECT 后漏升 TLS：WSS 必须验证证书/主机名后才发带 token 的 GET；WS 不自动升级或降级。

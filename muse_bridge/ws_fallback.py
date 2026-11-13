@@ -23,8 +23,8 @@ r"""最小 asyncio WebSocket 客户端（RFC 6455），只在 `websockets` 没�
      得到一串无意义的协议错误。这里的 SHA-1 是协议规定的摘要，不是加密选型。
   3. **收到 Ping 必须回 Pong**（§5.5.2），payload 原样带回。muse 侧空闲检测
      靠它，不回会被判死连。
-  4. **控制帧可以插在分片中间**（§5.4）。所以重组期间到的控制帧先攒着，
-     等这条消息拼完再按序交给上层，不能因为处理了一个 Pong 就丢数据。
+  4. **控制帧可以插在分片中间**（§5.4）。重组期间即时处理 Ping/Pong，
+     保留正文分片状态，不能因为处理控制帧就丢数据。
 
 已知限制（不做，也不假装做了）：不支持带认证的代理，也不支持 socks。
 需要认证代理的部署请装 `websockets`，protocol_client 会优先用它。
@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import hashlib
 import os
 import ssl
@@ -60,13 +59,23 @@ class WebSocketClosed(RuntimeError):
     """连接已关闭。code/reason 保留对端说的是什么，方便上层区分正常收尾与断链。"""
 
     def __init__(self, code: int | None = None, reason: str = "") -> None:
-        super().__init__(f"websocket closed (code={code} reason={reason!r})")
+        # A peer can place credentials or arbitrary text in the close reason.
+        super().__init__(f"websocket closed (code={code})")
         self.code = code
         self.reason = reason
 
 
 class WebSocketProtocolError(RuntimeError):
-    """对端违反 RFC 6455，或者压根不是 WS 服务。宁可报错也不猜。"""
+    """Protocol failure with optional safe HTTP metadata, never peer headers."""
+
+    def __init__(
+        self, message: str, *, status_code: int | None = None, stage: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.status_code = (
+            status_code if type(status_code) is int and 100 <= status_code <= 599 else None
+        )
+        self.stage = stage
 
 
 # ---------------------------------------------------------------- 帧编解码
@@ -135,25 +144,48 @@ async def _read_exactly(reader: asyncio.StreamReader, size: int) -> bytes:
 
 
 async def read_frame(
-    reader: asyncio.StreamReader, *, max_size: int = MAX_FRAME_SIZE
+    reader: asyncio.StreamReader, *, max_size: int = MAX_FRAME_SIZE,
+    expect_mask: bool | None = None, data_limit: int | None = None,
+    fragmented: bool | None = None,
 ) -> tuple[FrameHead, bytes]:
-    """解析一帧，返回 (FrameHead, payload)。掩码已在内部剥掉。"""
+    """Parse one frame; default role-neutral so test servers can read clients.
+
+    Client callers require unmasked frames and pass remaining message capacity.
+    All header/state/size checks precede mask-key and payload reads (RFC 6455 §5).
+    """
     head = FrameHead()
     first = await _read_exactly(reader, 2)
     head.fin = bool(first[0] & 0x80)
     head.opcode = first[0] & 0x0F
     if first[0] & 0x70:
         raise WebSocketProtocolError("reserved bits must be zero (RFC 6455 §5.2)")
+    if head.opcode not in (OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG):
+        raise WebSocketProtocolError("reserved websocket opcode")
     head.masked = bool(first[1] & 0x80)
+    if expect_mask is not None and head.masked != expect_mask:
+        raise WebSocketProtocolError("unexpected websocket masking direction")
     marker = first[1] & 0x7F
+    control = head.opcode >= OP_CLOSE
+    if control and (not head.fin or marker > 125):
+        raise WebSocketProtocolError("control frames must be final and at most 125 bytes")
+    if not control and fragmented is not None:
+        if head.opcode == OP_CONT and not fragmented:
+            raise WebSocketProtocolError("continuation without a start frame")
+        if head.opcode in (OP_TEXT, OP_BINARY) and fragmented:
+            raise WebSocketProtocolError("new data frame inside a fragment")
     if marker == 126:
         head.length = struct.unpack(">H", await _read_exactly(reader, 2))[0]
+        if head.length < 126:
+            raise WebSocketProtocolError("noncanonical websocket payload length")
     elif marker == 127:
         head.length = struct.unpack(">Q", await _read_exactly(reader, 8))[0]
+        if head.length < 65536 or head.length & (1 << 63):
+            raise WebSocketProtocolError("invalid 64-bit websocket payload length")
     else:
         head.length = marker
-    if head.length > max_size:
-        raise WebSocketProtocolError(f"frame too large: {head.length} > {max_size}")
+    limit = min(max_size, data_limit) if not control and data_limit is not None else max_size
+    if head.length > limit:
+        raise WebSocketProtocolError(f"frame or message too large: {head.length} > {limit}")
     if head.masked:
         head.mask_key = await _read_exactly(reader, 4)
     payload = await _read_exactly(reader, head.length) if head.length else b""
@@ -169,6 +201,14 @@ def _decode(opcode: int, payload: bytes) -> str | bytes:
         except UnicodeDecodeError as exc:
             raise WebSocketProtocolError("text frame is not valid UTF-8") from exc
     return payload
+
+
+def _valid_close_code(code: int) -> bool:
+    # RFC 6455 §7.4: wire-reserved sentinels and 1016..2999 aren't endpoint codes.
+    return type(code) is int and (
+        code in (1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014)
+        or 3000 <= code <= 4999
+    )
 
 
 # ---------------------------------------------------------------- 客户端
@@ -188,20 +228,24 @@ class WebSocket:
         writer: asyncio.StreamWriter,
         *,
         max_size: int = MAX_FRAME_SIZE,
+        close_timeout: float = 3.0,
     ) -> None:
         self._reader = reader
         self._writer = writer
         self._max_size = max_size
+        self._close_timeout = close_timeout
         self._closed = False
+        self._transport_closed = False
         self._frag_opcode: int | None = None
         self._frag = bytearray()
-        self._queued: list[tuple[int, bytes]] = []
 
     @property
     def closed(self) -> bool:
         return self._closed
 
     async def _write(self, raw: bytes) -> None:
+        if self._closed:
+            raise WebSocketClosed(None)
         self._writer.write(raw)
         await self._writer.drain()
 
@@ -214,14 +258,30 @@ class WebSocket:
             await self._write(encode_frame(bytes(data), OP_BINARY))
 
     async def ping(self, data: bytes = b"") -> None:
+        if len(data) > 125:
+            raise WebSocketProtocolError("ping payload exceeds 125 bytes")
         await self._write(encode_frame(data, OP_PING))
 
     async def recv(self) -> str | bytes:
+        if self._closed:
+            raise WebSocketClosed(None)
+        try:
+            return await self._recv_message()
+        except (WebSocketProtocolError, WebSocketClosed):
+            # A malformed or truncated frame cannot safely be resumed mid-stream.
+            self._closed = True
+            self._frag.clear()
+            self._frag_opcode = None
+            await self._finish_transport()
+            raise
+
+    async def _recv_message(self) -> str | bytes:
         while True:
-            if self._queued:
-                opcode, payload = self._queued.pop(0)
-                return _decode(opcode, payload)
-            head, payload = await read_frame(self._reader, max_size=self._max_size)
+            remaining = self._max_size - len(self._frag)
+            head, payload = await read_frame(
+                self._reader, max_size=max(self._max_size, 125), expect_mask=False,
+                data_limit=remaining, fragmented=self._frag_opcode is not None,
+            )
             if head.opcode in (OP_CLOSE, OP_PING, OP_PONG):
                 await self._handle_control(head, payload)
                 continue
@@ -230,7 +290,7 @@ class WebSocket:
                     raise WebSocketProtocolError("new data frame inside a fragment")
                 if head.fin:
                     return _decode(head.opcode, payload)
-                # 规则 4：分片未结束前到的控制帧走 _queued，不打断这条消息。
+                # Control frames are handled immediately without losing fragments.
                 self._frag_opcode, self._frag = head.opcode, bytearray(payload)
                 continue
             if head.opcode == OP_CONT:
@@ -246,44 +306,108 @@ class WebSocket:
 
     async def _handle_control(self, head: FrameHead, payload: bytes) -> None:
         if head.opcode == OP_PING:
-            await self._write(encode_frame(payload, OP_PONG))  # 规则 3
+            await self._write(encode_frame(payload, OP_PONG))
             return
         if head.opcode == OP_PONG:
             return
-        code = struct.unpack(">H", payload[:2])[0] if len(payload) >= 2 else None
-        reason = payload[2:].decode("utf-8", "replace") if len(payload) > 2 else ""
-        if not self._closed:
-            await self._write(encode_frame(payload or b"", OP_CLOSE))
-            self._closed = True
+        if len(payload) == 1:
+            raise WebSocketProtocolError("close payload has a one-byte status")
+        code = struct.unpack(">H", payload[:2])[0] if payload else None
+        if code is not None and not _valid_close_code(code):
+            raise WebSocketProtocolError("invalid websocket close code")
+        try:
+            reason = payload[2:].decode("utf-8") if payload else ""
+        except UnicodeDecodeError:
+            raise WebSocketProtocolError("close reason is not valid UTF-8") from None
+        await self._close_payload(payload)
         raise WebSocketClosed(code, reason)
 
-    async def close(self, code: int = NORMAL_CLOSE, reason: str = "") -> None:
-        """幂等：已经关过就只收尾，不抛。上层 close() 会被重复调用。"""
-        if not self._closed:
-            self._closed = True
-            body = struct.pack(">H", code) + reason.encode("utf-8")
-            with contextlib.suppress(OSError, WebSocketClosed, WebSocketProtocolError):
-                await self._write(encode_frame(body, OP_CLOSE))
+    def _abort_transport(self) -> None:
         self._writer.close()
-        with contextlib.suppress(OSError, ssl.SSLError, EOFError):
-            await self._writer.wait_closed()
+        transport = getattr(self._writer, "transport", None)
+        if transport is not None:
+            transport.abort()
+        self._transport_closed = True
+
+    async def _finish_transport(self) -> None:
+        if self._transport_closed:
+            return
+        try:
+            async with asyncio.timeout(self._close_timeout):
+                self._writer.close()
+                await self._writer.wait_closed()
+            self._transport_closed = True
+        except BaseException as exc:
+            self._abort_transport()
+            if not isinstance(exc, (OSError, EOFError, TimeoutError)):
+                raise
+
+    async def _close_payload(self, payload: bytes) -> None:
+        if self._closed:
+            await self._finish_transport()
+            return
+        # Gate every public/data write before the first close await. The one
+        # close frame bypasses _write, and no later ping/send/recv may write.
+        self._closed = True
+        self._frag.clear()
+        self._frag_opcode = None
+        try:
+            async with asyncio.timeout(self._close_timeout):
+                self._writer.write(encode_frame(payload, OP_CLOSE))
+                await self._writer.drain()
+                self._writer.close()
+                await self._writer.wait_closed()
+            self._transport_closed = True
+        except BaseException as exc:
+            self._abort_transport()
+            if not isinstance(exc, (OSError, EOFError, TimeoutError)):
+                raise
+
+    async def close(self, code: int = NORMAL_CLOSE, reason: str = "") -> None:
+        """Bound close-frame drain plus transport shutdown; preserve cancellation."""
+        if self._closed:
+            await self._finish_transport()
+            return
+        if not _valid_close_code(code):
+            raise WebSocketProtocolError("invalid websocket close code")
+        try:
+            encoded = reason.encode("utf-8")
+        except UnicodeEncodeError:
+            raise WebSocketProtocolError("close reason is not valid UTF-8") from None
+        if len(encoded) > 123:
+            raise WebSocketProtocolError("close reason exceeds 123 bytes")
+        await self._close_payload(struct.pack(">H", code) + encoded)
 
 
 # ---------------------------------------------------------------- 握手
 
 
 def _split_proxy(proxy: str) -> tuple[str, int]:
-    """从代理串取 host:port。带凭据直接拒绝，而不是静默丢掉后连到一个陌生出口。"""
-    text = proxy.split("://", 1)[-1]
-    if "@" in text:
-        raise WebSocketProtocolError(
-            "认证代理不被这个兜底客户端支持：请安装 websockets，"
-            "或改用无凭据的本地代理"
-        )
-    host, _, port = text.partition(":")
-    if not host:
-        raise WebSocketProtocolError("代理地址无法解析")
-    return host, int(port or "80")
+    """Accept only unauthenticated HTTP CONNECT proxies; fail before socket I/O."""
+    try:
+        text = proxy.strip()
+        parts = urlsplit(text if "://" in text else "http://" + text)
+        if parts.scheme.lower() != "http":
+            raise WebSocketProtocolError("兜底客户端只支持 HTTP CONNECT 代理")
+        if parts.username is not None or parts.password is not None:
+            raise WebSocketProtocolError("认证代理不被兜底客户端支持，请安装 websockets")
+        if parts.path not in ("", "/") or parts.query or parts.fragment:
+            raise WebSocketProtocolError("代理地址不能包含路径、查询串或片段")
+        host = parts.hostname
+        port = parts.port
+        if not host or any(char.isspace() for char in host) or parts.netloc.endswith(":"):
+            raise ValueError
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError
+        return host, port if port is not None else 80
+    except (ValueError, AttributeError, TypeError):
+        # Parsing errors can embed the original URL, including proxy passwords.
+        raise WebSocketProtocolError("代理地址无法解析") from None
+
+
+def _authority(host: str, port: int) -> str:
+    """IPv6 literals require brackets in CONNECT targets and HTTP Host fields."""
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
 async def _read_http_head(
@@ -327,12 +451,16 @@ async def _proxy_tunnel(
         async with asyncio.timeout(timeout):
             phost, pport = _split_proxy(proxy)
             reader, writer = await asyncio.open_connection(phost, pport)
-            request = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+            authority = _authority(host, port)
+            request = f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"
             writer.write(request.encode("ascii"))
             await writer.drain()
             status, _ = await _read_http_head(reader, "proxy CONNECT")
             if status != 200:
-                raise WebSocketProtocolError(f"proxy CONNECT failed (HTTP {status})")
+                raise WebSocketProtocolError(
+                    f"proxy CONNECT failed (HTTP {status})",
+                    status_code=status, stage="proxy_connect",
+                )
         return reader, writer
     except BaseException as exc:
         if writer is not None:
@@ -359,8 +487,7 @@ async def connect(
 ) -> WebSocket:
     """握手并返回 WebSocket。参数名对齐 `websockets.connect` 我们用得到的子集。
 
-    `close_timeout` 只是签名兼容用：这里的关闭是直接写 close 帧后 await
-    wait_closed()，没有独立的定时器需要它。
+    `close_timeout` bounds close-frame drain and transport shutdown after connect.
     """
     writer: asyncio.StreamWriter | None = None
     stage = "URL validation"
@@ -405,7 +532,7 @@ async def connect(
                 "Connection": "Upgrade",
                 "Sec-WebSocket-Key": key,
                 "Sec-WebSocket-Version": "13",
-                "Host": f"{host}:{port}",
+                "Host": _authority(host, port),
             }
             if origin:
                 headers["Origin"] = origin
@@ -421,10 +548,13 @@ async def connect(
             await writer.drain()
             status, fields = await _read_http_head(reader, "WebSocket Upgrade")
             if status != 101:
-                raise WebSocketProtocolError(f"handshake rejected (HTTP {status})")
+                raise WebSocketProtocolError(
+                    f"handshake rejected (HTTP {status})",
+                    status_code=status, stage="websocket_upgrade",
+                )
             if fields.get("sec-websocket-accept") != build_accept(key):
                 raise WebSocketProtocolError("handshake accept value mismatch")
-        return WebSocket(reader, writer, max_size=max_size)
+        return WebSocket(reader, writer, max_size=max_size, close_timeout=close_timeout)
     except BaseException as exc:
         if writer is not None:
             await _abort(writer)

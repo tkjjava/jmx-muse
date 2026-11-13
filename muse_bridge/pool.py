@@ -30,7 +30,7 @@ from .driver import BrowserUnavailable, MuseDriver
 from .env import env_flag
 from .protocol_client import ProtocolError
 from .protocol_driver import ProtocolDriver
-from .protocol_engine import ProtocolGenerationError, retryable
+from .protocol_engine import ProtocolGenerationError, ProtocolInterrupted, retryable
 from .scheduler_health import HealthTracker
 from .state import AccountState, after_probe, is_dispatchable
 from .store import AccountStore
@@ -486,6 +486,10 @@ async def _observe_reply(result, generator, *, timeout: float):
             yield item
             if time.monotonic() - started >= timeout:
                 raise ReplyTimeout(account=getattr(result, "account", ""))
+    except ProtocolInterrupted:
+        # Upstream aborted the turn explicitly. That is not an account fault and
+        # the consumer already got a truthful partial-error; keep health neutral.
+        raise
     except Exception:
         if account := getattr(result, "account", ""):
             _health.report(account, success=False, ttft_ms=first_ms)

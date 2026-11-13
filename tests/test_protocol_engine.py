@@ -34,6 +34,7 @@ from muse_bridge.protocol_engine import (
     MediaResource,
     ProtocolEngine,
     ProtocolGenerationError,
+    ProtocolInterrupted,
     ProtocolMediaTypeError,
     ProtocolModelRefusal,
     ProtocolQuotaExhausted,
@@ -44,6 +45,7 @@ from muse_bridge.protocol_engine import (
     decode_reference,
     normalize_media_path,
     resource_kind,
+    retryable,
     should_use_file_ref,
 )
 
@@ -225,13 +227,22 @@ def test_exception_layering_and_non_retryable_set():
     TypeError，见报告 protocol_engine.py:100），所以这里只能钉「终态集合」这份数据，
     钉不住谓词——谓词要等产品修好才能写绿测。
     """
-    for exc in (ProtocolModelRefusal, ProtocolQuotaExhausted, ProtocolMediaTypeError):
+    for exc in (
+        ProtocolModelRefusal,
+        ProtocolQuotaExhausted,
+        ProtocolMediaTypeError,
+    ):
         assert issubclass(exc, ProtocolGenerationError)
-    assert frozenset({ProtocolModelRefusal, ProtocolQuotaExhausted}) == NON_RETRYABLE
+    assert frozenset(
+        {ProtocolModelRefusal, ProtocolQuotaExhausted, ProtocolInterrupted}
+    ) == NON_RETRYABLE
     assert ProtocolModelRefusal in NON_RETRYABLE
     assert ProtocolQuotaExhausted in NON_RETRYABLE
+    assert ProtocolInterrupted in NON_RETRYABLE
     assert ProtocolGenerationError not in NON_RETRYABLE
     assert ProtocolMediaTypeError not in NON_RETRYABLE
+    assert retryable(ProtocolInterrupted("x")) is False
+    assert retryable(ProtocolGenerationError("x")) is True
 
 
 # ---------------------------------------------------------------- 提示词构建
@@ -885,6 +896,39 @@ async def test_quota_wording_in_delta_is_terminal():
         await engine.generate_image("一只猫")
 
 
+async def test_interrupted_status_is_terminal_not_a_model_refusal():
+    """interrupted 是上游显式中止：不是拒绝、不是完成，也不能换号重试。"""
+    events = [
+        image_event(1, path=IMAGE_PATH),
+        done_event(2, status="interrupted", transcript=transcript_text("写到一半")),
+    ]
+    client = FakeEngineClient(events, files={IMAGE_PATH: PNG})
+    engine, _ = make_engine(client)
+    with pytest.raises(ProtocolInterrupted, match="中止"):
+        await engine.generate_image("一只猫")
+    # Recovery must not be attempted after an explicit abort: no media fetch.
+    assert client.read_file_calls == []
+
+
+async def test_interrupted_event_media_is_not_yielded_or_fetched():
+    event = done_event(1, status="interrupted")
+    event["payload"]["resources"] = [{"path": "workspace/gen/cat.png", "mime": "image/png"}]
+    client = FakeEngineClient([event], files={"workspace/gen/cat.png": PNG})
+    engine, _ = make_engine(client)
+    with pytest.raises(ProtocolInterrupted):
+        await engine.generate_image("一只猫")
+    assert client.read_file_calls == []
+
+
+async def test_foreign_interrupted_event_cannot_abort_own_generation():
+    foreign = done_event(1, status="interrupted")
+    foreign["payload"]["chat_context"] = {"device_id": "someone-else"}
+    client = FakeEngineClient([foreign, done_event(2)])
+    engine, _ = make_engine(client)
+    with pytest.raises(ProtocolGenerationError, match="未收到 image 成品"):
+        await engine.generate_image("一只猫")
+
+
 async def test_model_refusal_from_message_done_is_not_retryable():
     """status 非 completed 且只回文本 = 模型拒绝生成；换号重试只会得到同样的拒绝。"""
     events = [
@@ -1101,6 +1145,34 @@ async def test_stream_chat_surfaces_refusal_then_raises():
             seen.append(event)
     assert [item["type"] for item in seen] == ["delta", "refused"]
     assert seen[-1]["text"] == "不生成"
+
+
+async def test_chat_interrupted_preserves_partial_but_never_claims_done():
+    """interrupted 是明确终态：已发出的部分保留，但绝不能补一个 done。"""
+    events = [
+        {"event": "delta.text_append", "seq": 1, "payload": {"text": "写到"}},
+        done_event(2, status="interrupted", transcript=transcript_text("写到")),
+    ]
+    engine = ProtocolEngine(FakeEngineClient(events))
+    seen = []
+    with pytest.raises(ProtocolInterrupted, match="中止"):
+        async for event in engine.stream_chat("hi"):
+            seen.append(event)
+    assert [item["type"] for item in seen] == ["delta"]
+    assert seen[0]["text"] == "写到"
+
+
+async def test_chat_unconfirmed_interrupted_does_not_become_client_terminal():
+    """Client EOF confirmation cannot override an explicit interrupted status."""
+    client = FakeEngineClient(
+        [
+            {"event": "delta.text_append", "seq": 1, "payload": {"text": "x"}},
+            done_event(2, status="interrupted"),
+        ],
+        turn_complete=True,
+    )
+    with pytest.raises(ProtocolInterrupted):
+        await ProtocolEngine(client).collect_chat("hi")
 
 
 async def test_chat_client_confirmed_terminal_can_complete_without_message_done():

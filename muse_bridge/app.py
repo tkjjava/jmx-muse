@@ -42,7 +42,7 @@ from .driver import CDP_URL, BrowserUnavailable, MuseDriver
 from .env import env_positive_float
 from .protocol_client import ProtocolAuthError, ProtocolError, ProtocolRateLimited
 from .protocol_driver import ProtocolDriver, ProtocolRefusal
-from .protocol_engine import ProtocolGenerationError
+from .protocol_engine import ProtocolGenerationError, ProtocolInterrupted
 from .refs import ReferenceError, fetch_public
 from .session_http import SessionError, renew_session
 from .session_http import wake_vm as http_wake_vm
@@ -67,6 +67,11 @@ def _protocol_failure(exc: BaseException) -> tuple[int, str, AccountState | None
     """
     if isinstance(exc, ProtocolRefusal):
         return 502, "protocol_refusal", None
+    if isinstance(exc, ProtocolInterrupted):
+        # Upstream explicitly aborted the turn. Not an account fault and not a
+        # refusal: retrying the same request or switching accounts is pointless
+        # (and may repeat quota spend), so keep the account state neutral.
+        return 409, "protocol_interrupted", None
     if isinstance(exc, ProtocolAuthError):
         return 401, "session_expired", AccountState.SESSION_EXPIRED
     if isinstance(exc, ProtocolRateLimited):

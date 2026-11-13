@@ -155,6 +155,32 @@ async def test_cancel_and_early_close_are_neutral_and_close_generator():
     assert pool._health.snapshot("a").samples == 0
 
 
+@pytest.mark.asyncio
+async def test_interrupted_turn_keeps_health_neutral_but_other_errors_count():
+    """上游显式中止不是账号故障：不产生失败样本，也不吞掉异常本身。"""
+    from muse_bridge.protocol_engine import ProtocolInterrupted
+
+    async def interrupted():
+        yield "partial"
+        raise ProtocolInterrupted("upstream aborted")
+
+    result = pool.DispatchResult(ok=True, account="a")
+    with pytest.raises(ProtocolInterrupted):
+        async for _ in pool._observe_reply(result, interrupted(), timeout=5):
+            pass
+    assert pool._health.snapshot("a").samples == 0
+
+    async def failed():
+        yield "partial"
+        raise RuntimeError("boom")
+
+    result = pool.DispatchResult(ok=True, account="b")
+    with pytest.raises(RuntimeError):
+        async for _ in pool._observe_reply(result, failed(), timeout=5):
+            pass
+    assert pool._health.snapshot("b").samples == 1
+
+
 def test_tracker_expiry_capacity_and_capability_separation(monkeypatch):
     now = [100.0]
     monkeypatch.setattr("muse_bridge.scheduler_health.time.monotonic", lambda: now[0])

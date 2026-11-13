@@ -70,11 +70,31 @@ async def test_turn_complete_requires_owned_known_status_and_resets():
         data += event("delta.message_done", {"chat_context": {"device_id": "foreign"}})
         data += event("agent.status", {"activity_code": "online"})
         await ws.inbox.put(wire(sid, body_chunk=BodyChunk(data=data, end_body=False)))
-        events = [e async for e in client.read_stream(timeout=0.5)]
+        stream = client.read_stream(timeout=0.5)
+        events = [await anext(stream) for _ in range(3)]
+        assert not client._turn_complete and client.turn_terminal_reason is None
+        events.extend([e async for e in stream])
         assert len(events) == 4 and client._turn_complete is True
+        assert client.turn_terminal_reason == "agent.status:online"
         client._seek_to_end(sid)
         assert [e async for e in client.read_stream(timeout=0.01)] == []
         assert client._turn_complete is False
+        assert client.turn_terminal_reason is None
+
+
+async def test_terminal_reason_is_available_before_consumer_closes_at_terminal():
+    async with pipe(lambda *a: reply(end_body=False)) as (client, ws):
+        sid = await client.subscribe()
+        await ws.inbox.put(wire(sid, body_chunk=BodyChunk(
+            data=b'{"event":"delta.text_append","payload":{"text":"own"}}\n'
+                 b'{"event":"task.status","payload":{"status":"completed"}}\n', end_body=False)))
+        stream = client.read_stream(timeout=0.5)
+        assert (await anext(stream))["text"] == "own"
+        assert client.turn_terminal_reason is None
+        await anext(stream)
+        assert client.turn_terminal_reason == "task.status:completed"
+        await stream.aclose()
+        assert client.turn_terminal_reason == "task.status:completed"
 
 
 async def test_unknown_status_or_idle_after_text_is_not_completion():
@@ -85,6 +105,7 @@ async def test_unknown_status_or_idle_after_text_is_not_completion():
                  b'{"event":"agent.status","payload":{}}\n', end_body=False)))
         events = [e async for e in client.read_stream(timeout=0.2, idle_timeout=0.01)]
         assert len(events) == 2 and not client._turn_complete
+        assert client.turn_terminal_reason is None
 
 
 async def test_encrypted_unknown_frame_consumes_nonce_but_cannot_allocate_response():

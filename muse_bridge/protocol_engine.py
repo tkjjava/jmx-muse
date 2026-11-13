@@ -119,9 +119,18 @@ class ProtocolMediaTypeError(ProtocolGenerationError):
     """期望模态与实际拿到的不符（例：期望视频只拿到封面静帧）。"""
 
 
-#: 拒绝与额度不足是终态；其余（超时、断连、模态不符）允许换号重试。
+class ProtocolInterrupted(ProtocolGenerationError):
+    """上游明确回报 `message_done.status="interrupted"`（取消/中止）。
+
+    这不是模型拒绝，也不是账号故障：换号重试只会把同一个被中止的结果再要
+    一遍，还可能重复消耗额度。调用方应把已产出的部分当部分结果处理，并以
+    明确的中断错误收尾，而不是伪装成完成或走浏览器回退。
+    """
+
+
+#: 拒绝、额度不足、上游中断都是终态；其余（超时、断连、模态不符）允许换号重试。
 NON_RETRYABLE: frozenset[type[BaseException]] = frozenset(
-    {ProtocolModelRefusal, ProtocolQuotaExhausted}
+    {ProtocolModelRefusal, ProtocolQuotaExhausted, ProtocolInterrupted}
 )
 
 QUOTA_TEXT_RE = re.compile(
@@ -896,12 +905,16 @@ class ProtocolEngine:
         # This coroutine never yields to a consumer: its full lifetime can safely
         # own cancellation, including staging, prefetch and the final file fetch.
         try:
-            async with asyncio.timeout(timeout):
+            async with asyncio.timeout(timeout) as budget:
                 return await self._generate_with_budget(
                     prompt, expect=expect, references=references,
                     timeout=timeout, on_progress=on_progress,
                 )
         except TimeoutError as exc:
+            if not budget.expired():
+                # A transport/staging/fetch operation can time out before the
+                # overall generation budget. Do not misreport that as exhaustion.
+                raise ProtocolGenerationError("纯协议上游操作超时，未收到完整结果") from exc
             raise ProtocolGenerationError("纯协议生成超时，未收到完整结果") from exc
 
     async def _generate_with_budget(
@@ -988,6 +1001,15 @@ class ProtocolEngine:
                 device = (payload.get("chat_context") or {}).get("device_id") \
                     if isinstance(payload.get("chat_context"), dict) else None
                 ours = device is None or str(device) == node_id
+
+                if name == "delta.message_done" and ours:
+                    status = str(payload.get("status") or "").strip().lower()
+                    if status == "interrupted":
+                        # Explicit upstream abort: not a refusal, not success, and
+                        # media carried by this event must not masquerade as output.
+                        raise ProtocolInterrupted(
+                            "Muse 中止了这次生成（message_done.status=interrupted）"
+                        )
 
                 if name == "delta.text_append" and ours:
                     progress(MILESTONES[0])
@@ -1089,11 +1111,13 @@ class ProtocolEngine:
                 try:
                     # Never leave a timeout active across yield: cancellation
                     # belongs only to our upstream wait, not the consumer's work.
-                    async with asyncio.timeout(remaining):
+                    async with asyncio.timeout(remaining) as wait_budget:
                         raw = await anext(iterator)
                 except StopAsyncIteration:
                     break
                 except TimeoutError as exc:
+                    if not wait_budget.expired():
+                        raise ProtocolGenerationError("纯协议上游操作超时，未收到完整结果") from exc
                     raise ProtocolGenerationError("纯协议生成超时，未收到完整结果") from exc
                 if self._monotonic() - started > timeout:
                     raise ProtocolGenerationError("纯协议生成超时，未收到完整结果")
@@ -1114,6 +1138,15 @@ class ProtocolEngine:
                     if isinstance(payload.get("chat_context"), dict) else None
                 ours = device is None or str(device) == node_id
 
+                if name == "delta.message_done" and ours:
+                    status = str(payload.get("status") or "").strip().lower()
+                    if status == "interrupted":
+                        # Explicit upstream abort: not a refusal, not success, and
+                        # media carried by this event must not masquerade as output.
+                        raise ProtocolInterrupted(
+                            "Muse 中止了这次对话（message_done.status=interrupted）"
+                        )
+
                 if name == "delta.text_append" and ours:
                     delta = str(payload.get("text") or "")
                     if delta:
@@ -1133,11 +1166,10 @@ class ProtocolEngine:
                     for item in candidates[before:]:
                         yield {"type": "media", "ref": item.to_event()}
                 if name == "delta.message_done" and ours:
-                    status = payload.get("status")
                     transcript = payload.get("transcript")
                     text = self._transcript_text(transcript)
-                    if status not in (None, "completed"):
-                        refused = text or "".join(text_parts) or str(status)
+                    if status and status != "completed":
+                        refused = text or "".join(text_parts) or status
                     elif not text_parts and text:
                         text_parts.append(text)
                         yield {"type": "delta", "text": text}
