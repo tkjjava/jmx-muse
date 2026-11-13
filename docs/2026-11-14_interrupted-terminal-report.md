@@ -10,15 +10,17 @@
 - 不是可换号重试的失败（换号只会把同一被中止的结果再要一遍，可能重复消耗额度）；
 - 不计入账号健康失败样本（账号没有过错，健康度保持中性）。
 
-新增 12 条回归，完整套件 **1880 passed**，ruff 与差异检查通过。
+本主题新增 9 条回归（另有 2 条补充活网取消语义的回归），完整套件
+**1881 passed**，ruff 与差异检查通过。
 
 ## 证据边界
 
 `interrupted` 只来自前端静态实现识别（`delta.message_done.status="interrupted"`
-时前端停止流并清理忙态）；本轮没有取得新的活网取消事件样本。此前一次显式取消的
-活网核验返回 `cancelled=true`、随后客户端识别终态，但未观察到 `message_done`，
-因此不能声称"取消必然产生 interrupted"或"ACK 即上游已停"。本轮的改动只是：
-**一旦服务端确实回报 interrupted，就按中止语义处理**，不把它当成拒绝或成功。
+时前端停止流并清理忙态）。本轮取得了一次活网取消样本：ACK 返回 `cancelled=true`，
+但 ACK 后仍有已缓冲正文到达、最终以 `agent.status:online` 收尾，没有出现
+`message_done`。因此不能声称"取消必然产生 interrupted"或"ACK 即上游已停"。
+本轮的改动只是：**一旦服务端确实回报 interrupted，就按中止语义处理**，
+不把它当成拒绝或成功。
 
 ## 行为
 
@@ -50,8 +52,33 @@ python tools/doc_assertions.py
 不影响本回合、聊天路径保留部分正文且不补 done、客户端 EOF 确认不能覆盖显式中断、
 409 映射不改账号状态、健康样本中性而普通异常仍记失败。
 
+## 活网补充证据（2026-11-14 Asia/Shanghai）
+
+在链路恢复后，对自行发起的一次回合做了取消时序核对（一次短文本请求 + 一次显式取消，
+未打印正文、账号或凭据）：
+
+```json
+{"ok":true,"via":"direct_noise_protocol","cancel_sent_after_own_text":true,
+ "cancelled_ack":true,"observed_done_statuses":[],"terminal_event":false,
+ "recognized_terminal":true,"terminal_reason":"agent.status:online",
+ "after_ack_text_events":8,"cancel_ack_elapsed_s":0.442,
+ "post_ack_observation_s":0.095,"elapsed_s":17.916}
+```
+
+可确认的事实：
+
+- `POST /chat/cancel` 返回布尔 `cancelled=true`，ACK 往返约 0.442 秒；
+- **ACK 之后仍收到 8 个正文增量**，随后以 `agent.status` 回到 online 收尾；
+- 没有出现 `delta.message_done`，因此没有观察到 `interrupted`；
+- 客户端新的终态原因元数据记录了 `agent.status:online`。
+
+结论：取消 ACK 不等于上游立即停止，已缓冲的正文可以晚于 ACK 到达。因此本地
+`read_stream` 必须继续消费到终态、不能因发送过取消就提前收尾；本轮新增回归钉住
+"取消请求不得中止本地订阅、不得改动完成状态或连接"。反过来也不能把 ACK 写成
+"所有后台工作已停止"。
+
 ## 尚未覆盖
 
-活网尚未观察到 `interrupted`，因此"取消 ACK 到 interrupted 的时延""中断后服务端
-是否还有晚到媒体"仍未验证。线程会话与跨客户端取消作用范围同样未验证。
+活网仍未观察到 `interrupted` 事件本身：无法确认取消必然产生它、其到达时延，以及
+中断后是否还有晚到媒体。线程会话与跨客户端取消作用范围同样未验证。
 本轮不对这些行为做承诺。

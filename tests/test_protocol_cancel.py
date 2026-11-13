@@ -48,6 +48,23 @@ async def test_plain_close_never_implicitly_cancels_shared_session():
         assert not ws.frames
 
 
+async def test_cancel_does_not_abort_local_subscription_or_terminal_state():
+    """Live evidence: deltas keep arriving after a cancel ACK. Sending cancel must
+    not tear down local stream state, mark completion, or poison the connection."""
+    async with pipe(lambda *a: json_reply({"cancelled": True})) as (client, ws):
+        client._sub_stream_id = 42
+        client._turn_complete = False
+        assert (await client.cancel_chat())["cancelled"] is True
+        assert client._sub_stream_id == 42
+        assert client._turn_complete is False
+        assert client.turn_terminal_reason is None
+        assert not client._connection_lost()
+        # Connection stays usable for another control request.
+        ws.respond = lambda *a: json_reply({"cancelled": False})
+        assert (await client.cancel_chat())["cancelled"] is False
+        assert len(ws.frames) == 2
+
+
 async def test_cancel_denied_preserves_http_error_and_is_not_retried():
     async with pipe(lambda *a: json_reply({"error": "denied"}, status=403)) as (client, ws):
         with pytest.raises(ProtocolError, match="HTTP 403"):

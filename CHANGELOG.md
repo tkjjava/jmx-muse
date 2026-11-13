@@ -12,7 +12,10 @@
   终态原因元数据（不含正文/凭据），每回合重置。
 - 新增 81 条回归，全量 1880 passed，ruff/差异检查通过。证据见
   docs/2026-11-14_interrupted-terminal-report.md、docs/2026-11-14_proxy-boundaries-report.md。
-- 活网未观察到 interrupted，取消 ACK→实际停止的时序未验证；不宣称该链路已打通。
+- 活网取消核验：ACK 返回 `cancelled=true`（0.442 秒），但 ACK 后仍收到 8 个已缓冲正文增量，
+  最终以 `agent.status:online` 收尾，未出现 `interrupted`/`message_done`。因此取消 ACK
+  不等于上游立即停止；新增回归钉住"取消不得中止本地订阅/完成状态"。全量更新为 1881 passed。
+- 未观察到 `interrupted` 事件本身，取消 ACK→实际停止时序仍未验证；不宣称该链路已打通。
 
 ---
 
