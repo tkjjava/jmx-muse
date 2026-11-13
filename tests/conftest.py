@@ -28,6 +28,7 @@ _PROTOCOL_RUNTIME_ENV = (
     "MUSE_STREAM_IDLE_TIMEOUT",  # 流空闲超时
     "MUSE_GENERATION_ENABLED",  # 生成能力开关
     "MUSE_REPLY_TIMEOUT",       # 回合超时
+    "MUSE_SCHEDULER",           # 测试显式选择调度模式
 )
 
 
@@ -36,3 +37,8 @@ def _no_operator_protocol_env(monkeypatch):
     """测试默认运行在「操作者没配任何协议变量」的基线上。"""
     for name in _PROTOCOL_RUNTIME_ENV:
         monkeypatch.delenv(name, raising=False)
+    from muse_bridge import pool
+
+    pool._health.clear()
+    yield
+    pool._health.clear()

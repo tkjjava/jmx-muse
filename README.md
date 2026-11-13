@@ -26,6 +26,15 @@
 > ⚠️ 本项目**必须**配合一个运行中且已登录的 Chrome。
 > muse 的传输层是加密 Noise WebSocket，无公开纯协议实现。
 
+## 账号调度
+
+`MUSE_SCHEDULER` 支持 `legacy`（默认轮转）、`shadow`（仍轮转，只比较评分首选）和
+`score`（TopK 加权随机）。点名账号不参与自动评分；`shadow` 不额外发送上游请求。
+健康度使用错误率和首个有效输出延迟 EWMA，聊天与生成分开统计，闲置 30 分钟过期。
+回退只需将该变量设回 `legacy` 并重启服务；`/healthz.scheduler_mode` 显示当前模式。
+评分差异计数见 `/admin/observability` 的 `scheduler_shadow_disagreements`。
+详细行为与边界见 [调度说明](docs/SCHEDULER.md)。
+
 ## 特性
 
 | | |

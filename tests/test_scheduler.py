@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import random
 
 import pytest
@@ -19,6 +20,7 @@ from muse_bridge.scheduler import (
     DEFAULT_WEIGHTS,
     NEUTRAL_TTFT_FACTOR,
     Candidate,
+    _weighted_shuffle,
     build_context,
     clamp01,
     explain,
@@ -201,3 +203,106 @@ def test_全相等候选不抛异常():
     assert ctx.max_ttft == ctx.min_ttft
     out = rank(pool, top_k=2, rng=random.Random(9))
     assert len(out) == 2
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+def test_clamp01_infinity(value):
+    assert clamp01(value) == (1.0 if value > 0 else 0.0)
+
+
+@pytest.mark.parametrize("value, expected", [(-5e307, 0.25), (0.0, 0.5), (5e307, 0.75)])
+def test_norm_extreme_finite_endpoints(value, expected):
+    assert norm(value, -1e308, 1e308) == pytest.approx(expected)
+
+
+def test_empty_weights_disable_every_factor():
+    candidate = _c("sticky", sticky=True)
+    ctx = build_context([candidate])
+    assert score_of(candidate, ctx, {}) == 0.0
+    assert score_of(candidate, ctx, None) > 0.0
+    pool = [_c("a", load_rate=1.0), _c("b", sticky=True)]
+    assert [c.name for c in rank(pool, weights={}, top_k=1)] == ["a", "b"]
+
+
+@pytest.mark.parametrize("sample_count", [1, 2])
+def test_equal_ttft_samples_are_neutral_like_missing_samples(sample_count):
+    pool = [_c(str(i), ttft_ms=500, has_ttft=True) for i in range(sample_count)]
+    pool.append(_c("new"))
+    ctx = build_context(pool)
+    assert [score_of(c, ctx, {"ttft": 1.0}) for c in pool] == [
+        NEUTRAL_TTFT_FACTOR
+    ] * len(pool)
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), -1.0])
+def test_invalid_time_samples_do_not_poison_other_candidates(invalid):
+    pool = [
+        _c("invalid", ttft_ms=invalid, has_ttft=True, reset_remaining=invalid),
+        _c("fast", ttft_ms=100, has_ttft=True, reset_remaining=10),
+        _c("slow", ttft_ms=500, has_ttft=True, reset_remaining=50),
+    ]
+    ctx = build_context(pool)
+    assert (ctx.min_ttft, ctx.max_ttft) == (100, 500)
+    assert (ctx.min_reset, ctx.max_reset) == (10, 50)
+    assert score_of(pool[0], ctx, {"ttft": 1.0}) == NEUTRAL_TTFT_FACTOR
+    assert score_of(pool[0], ctx, {"reset": 1.0}) == 0.0
+    assert score_of(pool[1], ctx, {"ttft": 1.0, "reset": 1.0}) == 2.0
+    assert score_of(pool[2], ctx, {"ttft": 1.0, "reset": 1.0}) == 0.0
+
+
+def test_reset_prefers_expiring_window_and_handles_equal_or_missing_windows():
+    pool = [_c("soon", reset_remaining=5), _c("later", reset_remaining=50), _c("none")]
+    ctx = build_context(pool)
+    assert [score_of(c, ctx, {"reset": 1.0}) for c in pool] == [1.0, 0.0, 0.0]
+    equal = build_context([pool[0], _c("same", reset_remaining=5), pool[2]])
+    assert score_of(pool[0], equal, {"reset": 1.0}) == 1.0
+    assert score_of(pool[2], equal, {"reset": 1.0}) == 0.0
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_invalid_priority_and_queue_do_not_poison_context(invalid):
+    valid = [_c("best", priority=0, waiting=0), _c("worst", priority=10, waiting=10)]
+    bad = _c("invalid", priority=invalid, waiting=invalid, load_rate=invalid)
+    ctx = build_context([bad, *valid])
+    assert (ctx.min_priority, ctx.max_priority, ctx.max_waiting) == (0, 10, 10)
+    assert score_of(bad, ctx, {"priority": 1.0, "queue": 1.0, "load": 1.0}) == 0.0
+    assert score_of(valid[0], ctx, {"priority": 1.0, "queue": 1.0}) == 2.0
+    assert score_of(valid[1], ctx, {"priority": 1.0, "queue": 1.0}) == 0.0
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf"), -0.1, 1.1])
+def test_error_rate_gate_rejects_invalid_rates_even_with_disabled_threshold(invalid):
+    assert rank([_c("invalid", error_rate=invalid)], max_error_rate=1.0) == []
+
+
+def test_error_gate_is_inclusive_and_can_leave_failed_candidate_eligible_for_recovery():
+    pool = [_c("failed", error_rate=1.0), _c("healthy", error_rate=0.0)]
+    assert [c.name for c in rank(pool, top_k=1, max_error_rate=1.0)] == [
+        "healthy", "failed"
+    ]
+    assert rank([_c("boundary", error_rate=0.9)], max_error_rate=0.9)
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_weights_fail_explicitly(invalid):
+    with pytest.raises(ValueError, match="weights must be finite"):
+        score_of(_c("a"), build_context([]), {"load": invalid})
+
+
+def test_overflowing_score_fails_explicitly():
+    with pytest.raises(ValueError, match="score must be finite"):
+        score_of(_c("a"), build_context([]), {"load": 1e308, "quota": 1e308})
+
+
+@pytest.mark.parametrize("scores", [(1e308, 0.0, -1e308), (1e308, 1e308, 0.0)])
+def test_extreme_finite_scores_preserve_roulette_bias_without_overflow(scores):
+    pool = list(zip(scores, [_c("best"), _c("mid"), _c("worst")], strict=True))
+    # 同时覆盖分差溢出与权重求和溢出；首个抽样 0.1 都应命中 best。
+    class FixedRandom(random.Random):
+        def random(self):
+            return 0.1
+
+    out = _weighted_shuffle(pool, FixedRandom())
+    assert [c.name for _, c in out] == ["best", "mid", "worst"]
+    assert all(math.isfinite(score) for score, _ in out)
+    assert len(pool) == 3  # 不修改调用方列表

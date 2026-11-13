@@ -782,6 +782,7 @@ async def healthz() -> dict:
         # 不反映单个账号有没有 cookie：没 cookie 的账号 dispatch 时仍会落到浏览器。
         # 生成正常路径同协议；仅"可重试类"协议失败会一次性回退浏览器（见 pool）。
         "chat_driver": "protocol" if pool._protocol_driver_enabled() else "browser",
+        "scheduler_mode": pool.scheduler_mode(),
         "protocol_proxy_configured": bool(
             os.environ.get("MUSE_PROTOCOL_PROXY", "").strip()
         ),

@@ -66,9 +66,20 @@ def norm(value: float, low: float, high: float) -> float:
 
     high == low 时无法归一化，返回 0.0（调用方通常再取 `1 - norm(...)`）。
     """
-    if high <= low:
+    if not math.isfinite(low) or not math.isfinite(high) or high <= low:
         return 0.0
-    return clamp01((value - low) / (high - low))
+    if math.isnan(value):
+        return 0.0
+    if value <= low:
+        return 0.0
+    if value >= high:
+        return 1.0
+    span = high - low
+    if math.isinf(span):
+        # 有限端点也可能相减溢出，例如 [-1e308, 1e308]。
+        scale = max(abs(low), abs(high))
+        return clamp01((value / scale - low / scale) / (high / scale - low / scale))
+    return clamp01((value - low) / span)
 
 
 @dataclass
@@ -87,7 +98,11 @@ class Candidate:
     sticky: bool = False            # 命中了粘性绑定
 
     def is_healthy(self, max_error_rate: float) -> bool:
-        return self.error_rate <= max_error_rate
+        return (
+            math.isfinite(self.error_rate)
+            and 0.0 <= self.error_rate <= 1.0
+            and self.error_rate <= max_error_rate
+        )
 
 
 @dataclass
@@ -110,16 +125,27 @@ def build_context(candidates: list[Candidate]) -> ScoreContext:
     ctx = ScoreContext()
     if not candidates:
         return ctx
-    prios = [c.priority for c in candidates]
-    ctx.min_priority, ctx.max_priority = min(prios), max(prios)
-    ctx.max_waiting = max((c.waiting for c in candidates), default=0)
+    prios = [c.priority for c in candidates if math.isfinite(c.priority)]
+    if prios:
+        ctx.min_priority, ctx.max_priority = min(prios), max(prios)
+    ctx.max_waiting = max(
+        (c.waiting for c in candidates if math.isfinite(c.waiting) and c.waiting >= 0),
+        default=0,
+    )
 
-    ttfts = [c.ttft_ms for c in candidates if c.has_ttft]
+    ttfts = [
+        c.ttft_ms for c in candidates
+        if c.has_ttft and math.isfinite(c.ttft_ms) and c.ttft_ms >= 0.0
+    ]
     if ttfts:
         ctx.min_ttft, ctx.max_ttft = min(ttfts), max(ttfts)
         ctx.has_ttft_sample = True
 
-    resets = [c.reset_remaining for c in candidates if c.reset_remaining is not None]
+    resets = [
+        c.reset_remaining for c in candidates
+        if c.reset_remaining is not None
+        and math.isfinite(c.reset_remaining) and c.reset_remaining >= 0.0
+    ]
     if resets:
         ctx.min_reset, ctx.max_reset = min(resets), max(resets)
         ctx.has_reset_sample = True
@@ -128,27 +154,38 @@ def build_context(candidates: list[Candidate]) -> ScoreContext:
 
 def score_of(c: Candidate, ctx: ScoreContext, weights: dict[str, float] | None = None) -> float:
     """单条候选的分数。权重为 0 的项跳过，保证「关掉某一项」时结果与不写这一项一致。"""
-    w = weights or DEFAULT_WEIGHTS
+    w = DEFAULT_WEIGHTS if weights is None else weights
+    if any(not math.isfinite(value) for value in w.values()):
+        raise ValueError("scheduler weights must be finite")
 
     total = 0.0
 
     # 优先级：数值越小越优先（沿用 sub2api 的语义：Priority 小者先选）
     if w.get("priority", 0.0):
-        f = 1.0 - norm(c.priority, ctx.min_priority, ctx.max_priority)
+        f = (
+            1.0 - norm(c.priority, ctx.min_priority, ctx.max_priority)
+            if math.isfinite(c.priority) else 0.0
+        )
         total += w["priority"] * f
 
     if w.get("load", 0.0):
-        total += w["load"] * (1.0 - clamp01(c.load_rate))
+        f = 1.0 - clamp01(c.load_rate) if math.isfinite(c.load_rate) else 0.0
+        total += w["load"] * f
 
     if w.get("queue", 0.0):
         denominator = max(1, ctx.max_waiting)
-        total += w["queue"] * (1.0 - clamp01(c.waiting / denominator))
+        f = 1.0 - clamp01(c.waiting / denominator) if math.isfinite(c.waiting) else 0.0
+        total += w["queue"] * f
 
     if w.get("error_rate", 0.0):
-        total += w["error_rate"] * (1.0 - clamp01(c.error_rate))
+        f = 1.0 - clamp01(c.error_rate) if math.isfinite(c.error_rate) else 0.0
+        total += w["error_rate"] * f
 
     if w.get("ttft", 0.0):
-        if c.has_ttft and ctx.has_ttft_sample:
+        if (
+            c.has_ttft and math.isfinite(c.ttft_ms) and c.ttft_ms >= 0.0
+            and ctx.has_ttft_sample and ctx.max_ttft > ctx.min_ttft
+        ):
             f = 1.0 - norm(c.ttft_ms, ctx.min_ttft, ctx.max_ttft)
         else:
             f = NEUTRAL_TTFT_FACTOR
@@ -156,7 +193,11 @@ def score_of(c: Candidate, ctx: ScoreContext, weights: dict[str, float] | None =
 
     if w.get("reset", 0.0):
         f = 0.0
-        if c.reset_remaining is not None and ctx.has_reset_sample:
+        # 越接近重置越优先：优先消耗即将刷新的窗口余量，不是等待越久越优先。
+        if (
+            c.reset_remaining is not None and math.isfinite(c.reset_remaining)
+            and c.reset_remaining >= 0.0 and ctx.has_reset_sample
+        ):
             if ctx.max_reset > ctx.min_reset:
                 f = 1.0 - norm(c.reset_remaining, ctx.min_reset, ctx.max_reset)
             else:
@@ -170,6 +211,8 @@ def score_of(c: Candidate, ctx: ScoreContext, weights: dict[str, float] | None =
     if w.get("sticky_bonus", 0.0) and c.sticky:
         total += w["sticky_bonus"]
 
+    if not math.isfinite(total):
+        raise ValueError("scheduler weighted score must be finite")
     return total
 
 
@@ -185,12 +228,9 @@ def _weighted_shuffle(
     if len(pool) <= 1:
         return pool
     min_score = min(s for s, _ in pool)
-    weights = []
-    for s, _ in pool:
-        w = (s - min_score) + 1.0
-        if math.isnan(w) or math.isinf(w) or w <= 0:
-            w = 1.0
-        weights.append(w)
+    # 先缩放再相减，避免有限分数的差或权重之和溢出。与原公式仅差共同倍数。
+    scale = max(1.0, max(abs(s) for s, _ in pool))
+    weights = [(s / scale - min_score / scale) + 1.0 / scale for s, _ in pool]
 
     out: list[tuple[float, Candidate]] = []
     while pool:
@@ -222,7 +262,8 @@ def rank(
     """选号主入口：过滤 → 评分 → TopK → 加权随机。
 
     `max_error_rate`：错误率超过这个值的账号**直接排除**，不参与评分。
-    这是硬闸门，不是软惩罚——一个已经 90% 失败的号，给多低的分都不该再被派到。
+    本函数没有冷却或探活机制：若 EWMA 只在请求后更新，硬排除可能导致永久无法恢复。
+    由外部健康层管理恢复时应传 1.0，让有效错误率只参与软评分；NaN/无穷仍排除。
 
     返回有序候选列表。空列表表示无号可派，调用方按现有 `NoAccountAvailable` 处理。
     """
@@ -237,7 +278,11 @@ def rank(
 
     k = max(1, min(int(top_k), len(scored)))
     # 先按分数全序排，取前 k 作为打散池。
-    scored.sort(key=lambda item: (-item[0], item[1].priority, item[1].name))
+    scored.sort(key=lambda item: (
+        -item[0],
+        item[1].priority if math.isfinite(item[1].priority) else math.inf,
+        item[1].name,
+    ))
     pool = scored[:k]
 
     generator = rng or random.Random()

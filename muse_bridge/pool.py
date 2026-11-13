@@ -25,12 +25,13 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from . import driver as driver_mod
-from . import observability
+from . import observability, scheduler
 from .driver import BrowserUnavailable, MuseDriver
 from .env import env_flag
 from .protocol_client import ProtocolError
 from .protocol_driver import ProtocolDriver
 from .protocol_engine import ProtocolGenerationError, retryable
+from .scheduler_health import HealthTracker
 from .state import AccountState, after_probe, is_dispatchable
 from .store import AccountStore
 
@@ -99,6 +100,43 @@ class DispatchResult:
 
 
 _cursor = {"index": 0}
+_health = HealthTracker()
+
+
+def scheduler_mode() -> str:
+    """Invalid configuration fails back to the existing rotation policy."""
+    mode = os.environ.get("MUSE_SCHEDULER", "legacy").strip().lower()
+    return mode if mode in {"legacy", "shadow", "score"} else "legacy"
+
+
+def _selection_order(records: list, capability: str) -> list:
+    mode = scheduler_mode()
+    if mode == "legacy":
+        return _rotate(records)
+    bucket = "chat" if capability == "chat" else "generation"
+    candidates = []
+    busy = set(busy_accounts())
+    for record in records:
+        sample = _health.snapshot(record.account, bucket)
+        candidates.append(scheduler.Candidate(
+            name=record.account,
+            load_rate=float(record.account in busy),
+            error_rate=sample.error_rate,
+            ttft_ms=sample.ttft_ms,
+            has_ttft=sample.has_ttft,
+        ))
+    # Health is a soft preference. A failed account must retain a recovery path.
+    ranked = scheduler.rank(candidates, max_error_rate=1.0)
+    by_name = {record.account: record for record in records}
+    scored = [by_name[c.name] for c in ranked]
+    observability.bump(f"scheduler_{mode}_selections")
+    if mode == "shadow":
+        legacy = _rotate(records)
+        if legacy and scored and legacy[0].account != scored[0].account:
+            observability.bump("scheduler_shadow_disagreements")
+        return legacy
+    return scored
+
 
 # 账号 → 互斥锁。模块级是刻意的：同一进程内所有请求共享这份调度状态。
 _locks: dict[str, asyncio.Lock] = {}
@@ -115,6 +153,7 @@ def _lock_for(account: str) -> asyncio.Lock:
 def forget_account(account: str) -> None:
     """删号后回收它的调度状态，锁表不随删号无界增长。"""
     _locks.pop(account, None)
+    _health.forget(account)
 
 
 def busy_accounts() -> list[str]:
@@ -240,7 +279,10 @@ async def dispatch(
     last_error = ""
     busy: list[str] = []
 
-    for record in _rotate(candidates):
+    # Explicit account assignment is authoritative and never enters ranking.
+    ordered = candidates if account else _selection_order(candidates, capability)
+    bucket = "chat" if capability == "chat" else "generation"
+    for record in ordered:
         account = record.account
 
         lock = _lock_for(account)
@@ -262,6 +304,7 @@ async def dispatch(
         # 调用方因此知道"这次没走协议"；失败分支不并 note，改为写账号状态。
         fallback_note = ""
         handed_off = False
+        cancelled = False
         try:
             try:
                 with observability.timed("warm_acquire"):
@@ -381,8 +424,13 @@ async def dispatch(
                 note=note,
                 _lock=lock,
             )
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
             if not handed_off:
+                if not cancelled:
+                    _health.report(account, success=False, capability=bucket)
                 try:
                     if driver is not None:
                         await driver.close()
@@ -396,6 +444,32 @@ async def dispatch(
         )
 
     return DispatchResult(ok=False, verdict="all_accounts_failed", note=last_error)
+
+
+async def _observe_reply(result, generator, *, timeout: float):
+    """One terminal sample per stream; TTFT starts when generation is requested."""
+    started = time.monotonic()
+    first_ms = None
+    try:
+        async for item in generator:
+            useful = bool(item) if isinstance(item, str) else any(
+                item.get(key) for key in ("content", "reasoning", "media")
+            )
+            if first_ms is None and useful:
+                first_ms = (time.monotonic() - started) * 1000
+            yield item
+            if time.monotonic() - started >= timeout:
+                raise ReplyTimeout(account=getattr(result, "account", ""))
+    except Exception:
+        if account := getattr(result, "account", ""):
+            _health.report(account, success=False, ttft_ms=first_ms)
+        raise
+    else:
+        if account := getattr(result, "account", ""):
+            _health.report(account, success=True, ttft_ms=first_ms)
+    finally:
+        # CancelledError and GeneratorExit bypass terminal samples but still close.
+        await generator.aclose()
 
 
 async def stream_reply(
@@ -413,17 +487,13 @@ async def stream_reply(
     if not result.ok or result.driver is None:
         return
 
-    deadline = time.monotonic() + timeout
     generator = result.driver.stream_reply(prompt, timeout=timeout)
-
+    observed = _observe_reply(result, generator, timeout=timeout)
     try:
-        async for delta in generator:
+        async for delta in observed:
             yield delta
-            if time.monotonic() >= deadline:
-                raise ReplyTimeout(account=getattr(result, "account", ""))
     finally:
-        # 生成器被提前丢弃时要显式关闭，否则内部的循环不会退出
-        await generator.aclose()
+        await observed.aclose()
 
 
 
@@ -444,7 +514,6 @@ async def stream_reply_events(
     if not result.ok:
         return
 
-    deadline = time.monotonic() + timeout
     driver = result.driver
 
     if driver is not None and hasattr(driver, "stream_reply_events"):
@@ -456,16 +525,20 @@ async def stream_reply_events(
                     yield {"content": delta}
 
         generator = _wrap()
+        # The string adapter already records the terminal sample.
+        try:
+            async for event in generator:
+                yield event
+        finally:
+            await generator.aclose()
+        return
 
+    observed = _observe_reply(result, generator, timeout=timeout)
     try:
-        async for event in generator:
+        async for event in observed:
             yield event
-            if time.monotonic() >= deadline:
-                # 到点截断必须让调用方知道："话没说完"和"说完了"是两种结果，
-                # 静默 return 会让上层报 finish_reason=stop，把半句话当成完整回复。
-                raise ReplyTimeout(account=getattr(result, "account", ""))
     finally:
-        await generator.aclose()
+        await observed.aclose()
 async def collect_reply_events(
     result: DispatchResult, prompt: str, *, timeout: float = 180.0
 ) -> tuple[str, str]:
@@ -622,8 +695,10 @@ async def generate_media(
                     timeout=budget,
                     reference_paths=refs_list,
                 )
+                _health.report(result.account, success=True, capability="generation")
                 break
             except Exception as exc:  # noqa: BLE001 - 统一分类后再抛出
+                _health.report(result.account, success=False, capability="generation")
                 last_error = exc
                 if attempt == 1 or not _generation_fallback_allowed(result, exc):
                     break
