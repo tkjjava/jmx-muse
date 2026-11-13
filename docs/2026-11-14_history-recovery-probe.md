@@ -123,8 +123,10 @@ event: {seq:int, event_name:"message.assistant"|"message.user",
 （`tests/test_protocol_engine.py`，含默认开启、显式关闭、非前缀拒绝、
 等长拒绝、seq 空间分歧、请求失败回退、delta+完整 `done` 组合）。
 
-**限制**：恢复只针对主会话（未传 `session_id`，线程回合仍会报不完整）；
-历史页是否包含**仍在生成中**的回合未验证（本实测都是在回合收尾后取到）。
+**限制**：恢复只针对主会话。协议层 `subscribe()` 现在不发送 `session_id`，桥内并不
+存在线程回合；线程不是"待补的恢复分支"，而是尚未支持的会话形态（将来若支持线程，
+需要把 `session_id` 同时传进订阅与 `chat_history()`）。历史页是否包含**仍在生成中**
+的回合未验证（本实测都是在回合收尾后取到）。
 
 ## 复现
 
