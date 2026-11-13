@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from muse_bridge import env, refs, session_http
+from muse_bridge.history import latest_assistant_text, newest_seq
 
 if TYPE_CHECKING:  # 落盘前不得运行时 import，否则整包 import 会炸
     from muse_bridge.protocol_client import HatchProtocolClient
@@ -594,8 +595,12 @@ class ProtocolEngine:
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         grace_seconds: float = LATE_MEDIA_GRACE_SECONDS,
+        history_recovery: bool = False,
     ) -> None:
         self.client = client
+        # 断线重连后的“历史对账恢复”：默认关闭。只有在真实响应形状被活网确认
+        # 之后才应默认打开（见 docs/2026-11-14_history-recovery-probe.md）。
+        self.history_recovery = bool(history_recovery)
         # 时钟注入点：测试里同时冻结 monotonic 与 wall clock，零墙钟成本。
         self._monotonic = monotonic
         self._time = wall_clock
@@ -685,12 +690,18 @@ class ProtocolEngine:
     ) -> tuple[str, list[dict[str, Any]]]:
         parts: list[str] = []
         media: list[dict[str, Any]] = []
+        done_text: str | None = None
         async for event in self.stream_chat(prompt, timeout=timeout):
             if event["type"] == "delta":
                 parts.append(str(event.get("text") or ""))
             elif event["type"] == "media":
                 media.append(event["ref"])
-        return "".join(parts), media
+            elif event["type"] == "done":
+                # `done` may carry the authoritative full text (history recovery
+                # replaces a truncated post-reconnect answer); fall back to the
+                # accumulated deltas when it is absent.
+                done_text = str(event.get("text") or "")
+        return (done_text if done_text is not None else "".join(parts)), media
 
     async def generate_image(
         self,
@@ -1087,6 +1098,37 @@ class ProtocolEngine:
             raise ProtocolGenerationError(f"生成完成但未收到 {expect} 成品")
         raise ProtocolGenerationError(f"未收到 {expect} 成品")
 
+    async def _recover_resumed_chat(self, partial: str) -> str | None:
+        """Try to replace a truncated post-reconnect answer with committed history.
+
+        Live probes showed events produced during a disconnect are not replayed,
+        so the only trustworthy recovery source is the committed history page.
+        The guard is deliberately strict: the committed assistant text must be a
+        *strict superset* that starts with everything already streamed to the
+        caller, and its newest seq must not be older than the live cursor.
+        Anything else returns None, and the caller keeps the incomplete error.
+        """
+        if not self.history_recovery:
+            return None
+        if not partial or getattr(self.client, "chat_history", None) is None:
+            return None
+        try:
+            page = await self._invoke("chat_history", limit=20, timeout=30.0)
+        except Exception:  # noqa: BLE001 - recovery must never mask the real error
+            return None
+        full = latest_assistant_text(page)
+        if not full or not full.startswith(partial) or len(full) <= len(partial):
+            return None
+        committed_newest = newest_seq(page)
+        live_cursor = getattr(self.client, "_last_seen_seq", None)
+        if (
+            committed_newest is not None
+            and isinstance(live_cursor, int)
+            and committed_newest < live_cursor
+        ):
+            return None
+        return full
+
     async def _run(
         self, prompt: str, *, expect: str | None, timeout: float
     ) -> AsyncIterator[dict[str, Any]]:
@@ -1192,10 +1234,15 @@ class ProtocolEngine:
                     # not replayed, and seq is not contiguous even without a drop.
                     # A generic status terminal can therefore close a truncated
                     # answer; only an authoritative message_done is trusted.
-                    raise ProtocolGenerationError(
-                        "断线重连后未收到权威完成事件，正文连续性无法确认"
-                        f"（已收 {len(text_parts)} 段，用时 {elapsed:.1f}s/{timeout}s）"
-                    )
+                    # Optional recovery: if committed history contains a strict
+                    # superset of what we streamed, return the complete text.
+                    recovered = await self._recover_resumed_chat("".join(text_parts))
+                    if recovered is None:
+                        raise ProtocolGenerationError(
+                            "断线重连后未收到权威完成事件，正文连续性无法确认"
+                            f"（已收 {len(text_parts)} 段，用时 {elapsed:.1f}s/{timeout}s）"
+                        )
+                    text_parts[:] = [recovered]
                 done = True
             else:
                 raise ProtocolGenerationError(

@@ -111,6 +111,11 @@ class FakeEngineClient:
         routes=None,
         async_media=False,
         turn_complete=False,
+        resumed=False,
+        terminal_reason=None,
+        history=None,
+        history_error=None,
+        last_seen_seq=0,
     ) -> None:
         self.events = list(events)
         self.media = list(media or [])
@@ -119,6 +124,13 @@ class FakeEngineClient:
         self.async_media = async_media
         self.turn_complete = turn_complete
         self._turn_complete = False
+        self._turn_resumed = False
+        self._resumed_by_fixture = bool(resumed)
+        self.turn_terminal_reason = terminal_reason
+        self.history = history
+        self.history_error = history_error
+        self.history_calls = []
+        self._last_seen_seq = last_seen_seq
         self.read_calls = []
         self.write_calls = []
         self.read_file_calls = []
@@ -136,6 +148,7 @@ class FakeEngineClient:
 
     async def read_stream(self, prompt=None, references=None, *, node_id=None, timeout=None):
         self._turn_complete = False
+        self._turn_resumed = False
         self.read_calls.append(
             {
                 "prompt": prompt,
@@ -150,6 +163,16 @@ class FakeEngineClient:
                 continue
             yield item
         self._turn_complete = self.turn_complete
+        # ``resumed`` models a turn that had to reconnect after the prompt;
+        # it is applied after the stream so callers still see the fake events.
+        if self._resumed_by_fixture:
+            self._turn_resumed = True
+
+    async def chat_history(self, *, limit=20, timeout=30.0, session_id=None):
+        self.history_calls.append({"limit": limit, "timeout": timeout, "session_id": session_id})
+        if self.history_error is not None:
+            raise self.history_error
+        return self.history if self.history is not None else {"chat_events": []}
 
     async def fs_write(self, data, mime, filename):
         self.write_calls.append((bytes(data), mime, filename))
@@ -1209,6 +1232,87 @@ async def test_chat_completion_state_is_reset_for_next_incomplete_stream():
     client.turn_complete = False
     with pytest.raises(ProtocolGenerationError, match="未收到完整结果"):
         await engine.collect_chat("second")
+
+
+def committed_history(text, seq=5):
+    return {
+        "chat_events": [
+            {"seq": seq, "event_name": "message.assistant", "content": text},
+        ]
+    }
+
+
+def resumed_client(partial, **kwargs):
+    kwargs.setdefault("last_seen_seq", 1)
+    return FakeEngineClient(
+        [{"event": "delta.text_append", "seq": 1, "payload": {"text": partial}}],
+        turn_complete=True,
+        resumed=True,
+        terminal_reason="agent.status:online",
+        **kwargs,
+    )
+
+
+async def test_chat_recovers_truncated_answer_from_committed_history():
+    client = resumed_client("9+9等于", history=committed_history("9+9等于18。"))
+    engine = ProtocolEngine(client, history_recovery=True)
+    text, media = await engine.collect_chat("9+9", timeout=5)
+    assert text == "9+9等于18。"
+    assert media == []
+    assert client.history_calls == [{"limit": 20, "timeout": 30.0, "session_id": None}]
+
+
+async def test_chat_recovery_is_opt_in_and_off_by_default():
+    client = resumed_client("9+9等于", history=committed_history("9+9等于18。"))
+    with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+        await ProtocolEngine(client).collect_chat("9+9", timeout=5)
+    assert client.history_calls == [], "默认关闭时不得额外发历史请求"
+
+
+async def test_chat_recovery_rejects_unrelated_committed_message():
+    client = resumed_client("9+9等于", history=committed_history("完全不同的回答"))
+    engine = ProtocolEngine(client, history_recovery=True)
+    with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+        await engine.collect_chat("9+9", timeout=5)
+    assert len(client.history_calls) == 1
+
+
+async def test_chat_recovery_requires_strict_superset():
+    client = resumed_client("9+9等于", history=committed_history("9+9等于"))
+    engine = ProtocolEngine(client, history_recovery=True)
+    with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+        await engine.collect_chat("9+9", timeout=5)
+
+
+async def test_chat_recovery_rejects_stale_commit_older_than_live_cursor():
+    client = resumed_client(
+        "9+9等于", history=committed_history("9+9等于18。", seq=3), last_seen_seq=9
+    )
+    engine = ProtocolEngine(client, history_recovery=True)
+    with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+        await engine.collect_chat("9+9", timeout=5)
+
+
+async def test_chat_recovery_fetch_failure_keeps_incomplete_error():
+    client = resumed_client(
+        "9+9等于", history_error=RuntimeError("history down")
+    )
+    engine = ProtocolEngine(client, history_recovery=True)
+    with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+        await engine.collect_chat("9+9", timeout=5)
+    assert len(client.history_calls) == 1
+
+
+async def test_chat_recovery_streams_partial_deltas_then_complete_done_text():
+    client = resumed_client(
+        "9+9等于",
+        history=committed_history("9+9等于18。"),
+    )
+    engine = ProtocolEngine(client, history_recovery=True)
+    events = [event async for event in engine.stream_chat("9+9", timeout=5)]
+    assert [event["type"] for event in events] == ["delta", "done"]
+    assert events[0]["text"] == "9+9等于"
+    assert events[-1]["text"] == "9+9等于18。"
 
 
 @pytest.mark.parametrize("status", ["completed", "refused"])

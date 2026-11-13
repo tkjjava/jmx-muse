@@ -9,6 +9,9 @@
   因此不接入自动恢复，保持"重连后无权威完成即报不完整"的保守策略。
 - 新增 `muse_bridge/history.py`：宽容解析历史页（`chat_events`/`transcript_revision`/
   `has_more`、事件文本优先级、seq 排序），16 条纯函数回归；**未接入**引擎自动恢复。
+- 引擎新增 opt-in `history_recovery`（默认关）：重连回合以普通状态收尾时，用已提交
+  历史做严格前缀 + 游标新鲜度校验，只有确认是同一回答的完整版才取代失败；7 条回归。
+  `collect_chat` 在 `done` 存在时采用其文本。默认关闭，app 接线未变。
 - 证据见 docs/2026-11-14_history-recovery-probe.md。
 
 ---

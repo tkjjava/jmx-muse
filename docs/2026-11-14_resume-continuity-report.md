@@ -59,6 +59,31 @@ python -m pytest tests/test_protocol_resume.py -q -p no:cacheprovider
 工具只读账号库，输出游标/seq/段数/是否权威完成的 JSON，不打印正文与凭据。
 它会真实消耗一次约 400 字回答的额度并主动断线一次，只用于自有/已授权账号。
 
+## 恢复层（opt-in，默认关闭）
+
+既然 live 补发不可靠，唯一的恢复来源是已提交历史。`ProtocolEngine` 新增
+`history_recovery: bool = False` 开关：**只有显式打开才生效**，当前 app 接线
+仍保持关闭，直到 `chat.history` 响应形状被活网确认。
+
+打开后，重连回合以普通状态收尾时按以下顺序判定：
+
+| 检查 | 失败结果 |
+|---|---|
+| 客户端支持 `chat_history()` | 保留"连续性无法确认"错误 |
+| 历史页最后一条 assistant 正文非空 | 同上 |
+| 已收正文是它的**严格前缀**（`full.startswith(partial)` 且更长） | 同上 |
+| 历史页 `newest_seq` 不早于 live 游标 `_last_seen_seq` | 同上 |
+| 历史请求异常（任何异常） | 同上，不掩盖原错误 |
+
+通过后把 `done` 文本替换为完整正文；`stream_chat` 仍先按原样吐已收到的
+delta，`collect_chat` 改为在 `done` 存在时采用其文本（常态两者一致）。
+
+7 条回归覆盖：正例、默认关闭不发历史请求、非前缀拒绝、等长拒绝、陈旧提交
+拒绝、历史请求失败回退、`stream_chat` 的 delta+完整 `done` 组合。
+
+**限制**：恢复只针对主会话（未传 `session_id`，线程回合仍会报不完整）；
+`chat.history` 的真实字段仍未活网确认，所以默认值必须保持关闭。
+
 ## 尚未证明
 
 探针只有两次，不能排除服务端在某些条件下会补发；`after_stream_seq` 的严格
