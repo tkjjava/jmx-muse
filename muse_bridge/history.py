@@ -7,21 +7,25 @@ by re-fetching committed history and merging by seq. This module turns a history
 page into plain (role, text) messages so a caller can decide whether the
 committed answer is complete.
 
-Evidence level: **static frontend anchors, not a live capture of this endpoint**
-(the live probe is currently blocked by an intermittent HTTP 502 at Upgrade).
-The parser is deliberately tolerant about where text lives, because the exact
-nesting is unverified:
+Evidence level: static frontend anchors **plus live validation** (2026-11-14).
+A real page was captured: top level `{channel, chat_events, has_more,
+transcript_revision}`; each event carries `event_name` (`message.user` /
+`message.assistant`), `role`, `seq`, `message_id`, and both a top-level
+`display_text` and `payload.display_text`/`payload.content` (identical length
+in the observed page). The parser still stays tolerant about where text lives,
+because other event kinds and older pages were not sampled:
 
   * page envelope: bare page, or wrapped in ``result`` / ``data``
-    (anchor: 24thn7in_976_.js @85765 / @103814 reads ``t.chat_events``);
-  * event text: ``payload.content``, ``content``, ``display_text``,
-    ``payload.display_text`` in that order
-    (anchor: 24thn7in_976_.js @59874 picks content/display_text variants);
+    (anchor: 24thn7in_976_.js @85765 / @103814 reads ``t.chat_events``;
+    live page is bare);
+  * event text: ``display_text``, ``content``, then ``payload.display_text`` /
+    ``payload.content`` (anchor: 24thn7in_976_.js @59874; live-validated);
   * history revisions carry ``transcript_revision`` at page level
-    (anchor: 24thn7in_976_.js @36022 requires it once established);
+    (anchor: 24thn7in_976_.js @36022; live page: integer);
   * message events use ``event_name`` values ``message.user`` /
     ``message.assistant`` with ``seq``/``message_id``/``role``
-    (anchors: 24thn7in_976_.js @25966, @74920; 0ikdqggttpa8f.js @19646).
+    (anchors: 24thn7in_976_.js @25966, @74920; 0ikdqggttpa8f.js @19646;
+    live-validated).
 
 Nothing here talks to the network or logs message text. Callers must not treat
 the result as proof of completeness: it only proves what the server committed.

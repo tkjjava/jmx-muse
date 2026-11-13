@@ -578,6 +578,16 @@ python -Xutf8 D:\deep seek\work\probe_restart_bridge.py   # 跑完必须恢复�
 `work/canvas_re/resume-live2/resume-live2.json`（另有一次 v1 文本实验因"掐断时
 回答已整段到达本地缓冲区"导致 reconnect=0，属实验设计无效，已留档并注明）。
 
+**2026-11-14 追加（聊天回合）**：断线窗口内的事件不会被补发（2 次探针：断线前
+seq=880，重连后首收 922；正文 66/28 字，对比无断线基线 456 字），但**已提交历史
+可以取回完整正文**：`GET /chat/history` 返回 `{channel, chat_events, has_more,
+transcript_revision}`，事件带 `event_name`/`role`/`seq`/`message_id`/`display_text`。
+引擎据此默认开启 `history_recovery`：重连回合以普通状态收尾时，若历史中的
+assistant 正文是已收正文的严格前缀，就用全文完成；实测 169→456 字、整链路
+2 段 delta→456 字。历史 seq 与 live 流 seq 是两套序列（683 vs 734），不做游标
+比较。证据：docs/2026-11-14_resume-continuity-report.md、
+docs/2026-11-14_history-recovery-probe.md。
+
 ### 1.6.2 2026-11-11 09:5x 剩余路由面真机探针（Spaces / idea-cards / 额度候选）
 
 > 环境同上（真账号 `muse1` + 本机 mihomo）。**全部只发 GET**：不创建 Space、

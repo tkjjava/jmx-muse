@@ -148,3 +148,70 @@ def test_empty_text_values_do_not_shadow_real_ones():
         "payload": {"content": "payload 文本"},
     }))
     assert rows[0].text == "有效文本"
+
+
+def live_shaped_event(text, *, seq=680, role="assistant", event_name="message.assistant"):
+    """Shape captured live 2026-11-14 (values fabricated, keys verbatim)."""
+    return {
+        "seq": seq,
+        "event_name": event_name,
+        "role": role,
+        "message_id": "m" * 50,
+        "display_text": text,
+        "display_text_ready": True,
+        "display_text_updated_at_ms": 1_700_000_000_000,
+        "occurred_at_ms": 1_700_000_000_001,
+        "parent_agent_id": "a" * 36,
+        "parent_message_id": None,
+        "reply_to_message_id": "",
+        "resources": [],
+        "reaction_emoji": None,
+        "agent_id": None,
+        "transcript_surface": "primary",
+        "visibility": "visible",
+        "chat_context": {
+            "chat_id": "c" * 36,
+            "chat_kind": "main",
+            "device_id": "d" * 36,
+            "event_kind": "message",
+            "originating_channel": "web",
+            "require_mention": False,
+        },
+        "payload": {
+            "content": text,
+            "display_text": text,
+            "display_text_ready": True,
+            "role": role,
+            "seq": seq,
+            "message_id": "m" * 50,
+            "chat_event_seq": seq - 1,
+            "is_thread": False,
+            "session_id": "s" * 36,
+            "source": "assistant",
+            "status": "completed",
+            "metadata": {},
+            "chat_context": {},
+            "transcript_surface": "primary",
+            "visibility": "visible",
+        },
+    }
+
+
+def test_live_shaped_page_is_parsed():
+    page_body = {
+        "channel": "all",
+        "chat_events": [
+            live_shaped_event("完整回答"),
+            live_shaped_event("提问", seq=679, role="user", event_name="message.user"),
+        ],
+        "has_more": True,
+        "transcript_revision": 42,
+    }
+    assert [(m.seq, m.role, m.text) for m in messages(page_body)] == [
+        (679, "user", "提问"),
+        (680, "assistant", "完整回答"),
+    ]
+    assert latest_assistant_text(page_body) == "完整回答"
+    assert newest_seq(page_body) == 680
+    assert transcript_revision(page_body) == 42
+    assert has_more(page_body) is True

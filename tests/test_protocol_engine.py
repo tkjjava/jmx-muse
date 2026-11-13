@@ -1262,11 +1262,20 @@ async def test_chat_recovers_truncated_answer_from_committed_history():
     assert client.history_calls == [{"limit": 20, "timeout": 30.0, "session_id": None}]
 
 
-async def test_chat_recovery_is_opt_in_and_off_by_default():
+async def test_chat_recovery_is_on_by_default():
+    """Live-validated recovery: resumed generic terminal + committed superset."""
     client = resumed_client("9+9等于", history=committed_history("9+9等于18。"))
+    text, _media = await ProtocolEngine(client).collect_chat("9+9", timeout=5)
+    assert text == "9+9等于18。"
+    assert len(client.history_calls) == 1
+
+
+async def test_chat_recovery_can_be_disabled_explicitly():
+    client = resumed_client("9+9等于", history=committed_history("9+9等于18。"))
+    engine = ProtocolEngine(client, history_recovery=False)
     with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
-        await ProtocolEngine(client).collect_chat("9+9", timeout=5)
-    assert client.history_calls == [], "默认关闭时不得额外发历史请求"
+        await engine.collect_chat("9+9", timeout=5)
+    assert client.history_calls == [], "关闭时不得额外发历史请求"
 
 
 async def test_chat_recovery_rejects_unrelated_committed_message():
@@ -1284,13 +1293,15 @@ async def test_chat_recovery_requires_strict_superset():
         await engine.collect_chat("9+9", timeout=5)
 
 
-async def test_chat_recovery_rejects_stale_commit_older_than_live_cursor():
+async def test_chat_recovery_accepts_divergent_history_seq_space():
+    """History seq and live stream seq are different sequences (observed live:
+    committed newest 683 vs live cursor 734); seq must not gate recovery."""
     client = resumed_client(
         "9+9等于", history=committed_history("9+9等于18。", seq=3), last_seen_seq=9
     )
     engine = ProtocolEngine(client, history_recovery=True)
-    with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
-        await engine.collect_chat("9+9", timeout=5)
+    text, _media = await engine.collect_chat("9+9", timeout=5)
+    assert text == "9+9等于18。"
 
 
 async def test_chat_recovery_fetch_failure_keeps_incomplete_error():

@@ -1,17 +1,18 @@
-## 2026-11-14 — `chat.history` 恢复接口取证（未接入）
+## 2026-11-14 — `chat.history` 恢复：活网确认并默认开启
 
 - 前端静态证据：断线恢复走 `GET /chat/history`（参数 limit/transcript_mode/[session_id]，
   分页 before_seq/after_seq），按 chat_events seq 合并、transcript_revision 防覆盖；非 live 补发。
-- 新增最小客户端 `chat_history()`（1..200 limit、GET+query+空 body、data/result 信封解包）
+- 新增客户端 `chat_history()`（1..200 limit、GET+query+空 body、data/result 信封解包）
   及 10 条帧级回归。
-- 三次活网尝试均未取得响应：两次停在聊天阶段，一次纯连接取历史在请求期遇到
-  `InvalidStatus HTTP 502`（有/无代理均复现，属上游握手瞬时故障，非路由被拒）。
-  因此不接入自动恢复，保持"重连后无权威完成即报不完整"的保守策略。
-- 新增 `muse_bridge/history.py`：宽容解析历史页（`chat_events`/`transcript_revision`/
-  `has_more`、事件文本优先级、seq 排序），16 条纯函数回归；**未接入**引擎自动恢复。
-- 引擎新增 opt-in `history_recovery`（默认关）：重连回合以普通状态收尾时，用已提交
-  历史做严格前缀 + 游标新鲜度校验，只有确认是同一回答的完整版才取代失败；7 条回归。
-  `collect_chat` 在 `done` 存在时采用其文本。默认关闭，app 接线未变。
+- 先经历间歇 Upgrade 502（有/无代理均复现，属上游握手故障）；恢复后取得真实响应：
+  顶层 `{channel, chat_events, has_more, transcript_revision}`，事件带 `event_name`/
+  `role`/`seq`/`message_id`/`display_text`（与 payload 内容同长）。
+- 新增 `muse_bridge/history.py`：宽容解析历史页（文本优先级、seq 排序、双信封），
+  16 条纯函数回归；在真实页上实测 5 条消息、角色交替、最新 assistant 456 字。
+- 引擎 `history_recovery` **默认开启**（`False` 可关）：重连回合以普通状态收尾时，
+  只有已提交历史给出“已收正文的严格前缀”才用全文取代失败；活网实测 169→456 字、
+  引擎整链路 2 段 delta→`done` 456 字。8 条引擎回归。
+- 关键修正：历史 seq 与 live 流 seq 不是同一序列（683 vs 734），移除游标比较守卫。
 - 证据见 docs/2026-11-14_history-recovery-probe.md。
 
 ---

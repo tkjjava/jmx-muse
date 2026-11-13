@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from muse_bridge import env, refs, session_http
-from muse_bridge.history import latest_assistant_text, newest_seq
+from muse_bridge.history import latest_assistant_text
 
 if TYPE_CHECKING:  # 落盘前不得运行时 import，否则整包 import 会炸
     from muse_bridge.protocol_client import HatchProtocolClient
@@ -595,11 +595,13 @@ class ProtocolEngine:
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         grace_seconds: float = LATE_MEDIA_GRACE_SECONDS,
-        history_recovery: bool = False,
+        history_recovery: bool = True,
     ) -> None:
         self.client = client
-        # 断线重连后的“历史对账恢复”：默认关闭。只有在真实响应形状被活网确认
-        # 之后才应默认打开（见 docs/2026-11-14_history-recovery-probe.md）。
+        # 断线重连后的“历史对账恢复”：默认开启。活网验证（2026-11-14）：
+        # 断线回合以普通状态收尾时，已提交历史里的完整正文与已收正文是严格
+        # 前缀关系（169→456 字、2 段→456 字两次验证）。历史取不到或前缀不符时
+        # 仍回退到“连续性无法确认”错误，不会伪造结果。可用 False 关闭。
         self.history_recovery = bool(history_recovery)
         # 时钟注入点：测试里同时冻结 monotonic 与 wall clock，零墙钟成本。
         self._monotonic = monotonic
@@ -1105,8 +1107,13 @@ class ProtocolEngine:
         so the only trustworthy recovery source is the committed history page.
         The guard is deliberately strict: the committed assistant text must be a
         *strict superset* that starts with everything already streamed to the
-        caller, and its newest seq must not be older than the live cursor.
-        Anything else returns None, and the caller keeps the incomplete error.
+        caller. Anything else returns None, and the caller keeps the incomplete
+        error.
+
+        Note: history event seq and the live subscription stream seq are
+        **different sequences** (live 2026-11-14: committed newest 683 while the
+        live cursor was 734 for the same answer), so cursor comparison must not
+        be used as a freshness check. The prefix identity check is the guard.
         """
         if not self.history_recovery:
             return None
@@ -1118,14 +1125,6 @@ class ProtocolEngine:
             return None
         full = latest_assistant_text(page)
         if not full or not full.startswith(partial) or len(full) <= len(partial):
-            return None
-        committed_newest = newest_seq(page)
-        live_cursor = getattr(self.client, "_last_seen_seq", None)
-        if (
-            committed_newest is not None
-            and isinstance(live_cursor, int)
-            and committed_newest < live_cursor
-        ):
             return None
         return full
 
