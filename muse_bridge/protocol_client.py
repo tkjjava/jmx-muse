@@ -1063,14 +1063,25 @@ class HatchProtocolClient:
             from . import ws_fallback
 
             return ws_fallback.connect
-        return websockets.connect
+        async def open_ws(url: str, **kwargs):
+            # Our injectable opener contract uses user_agent (as does ws_fallback),
+            # but websockets passes unknown kwargs to loop.create_connection.
+            # Its actual HTTP header argument is user_agent_header.
+            if "user_agent" in kwargs:
+                kwargs["user_agent_header"] = kwargs.pop("user_agent")
+            # websockets >=15 defaults proxy=True (system/environment discovery).
+            # Match HTTP trust_env=False: only use an explicitly supplied proxy.
+            kwargs.setdefault("proxy", None)
+            return await websockets.connect(url, **kwargs)
+
+        return open_ws
 
     async def _open_noise_ws(self, vm_type: str) -> None:
         opener = self._ws_opener or self._default_ws_opener()
         kwargs: dict = {
             "origin": self.site,
             "max_size": 4 * 1024 * 1024,
-            "open_timeout": self.handshake_timeout,
+            "open_timeout": self.ws_open_timeout,
             "close_timeout": 3.0,
             "additional_headers": {
                 "Accept-Language": "en-US,en-GB;q=0.9,en;q=0.8",
