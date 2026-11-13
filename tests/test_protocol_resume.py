@@ -860,3 +860,145 @@ async def test_engine_collect_chat_completes_across_reconnect():
         assert text == "9+9等于18。", "重连不得让引擎看到重复或缺失的正文"
         assert media == []
         assert client._last_seen_seq == 3
+
+
+@pytest.mark.parametrize("reject_resume", [False, True])
+async def test_coalesced_subscribe_ack_old_and_new_events_preserve_new_tail(reject_resume):
+    """Headers may already contain the whole replay before subscribe() returns.
+
+    Exercise the real encrypted receiver, including fallback to {} when resume
+    fields are rejected. Arrival timing must not decide which tail is delivered.
+    """
+    script = ScriptedHTTP({
+        ("GET", "/api/session"): [http_json(session_json())],
+        ("POST", "/api/hatch/token"): [http_json(TOKEN_BODY)],
+    })
+    old = ev(2, text="already delivered")
+    # A discarded replay must not advance the independent chat cursor.
+    old["chat_event_seq"] = 999
+    fresh = ev(3, text="new tail")
+    fresh["chat_event_seq"] = 3
+    late_fresh = ev(5, name="noop")
+    late_fresh["chat_event_seq"] = 5
+    terminal = ev(4, activity="idle")
+    terminal["chat_event_seq"] = 4
+    coalesced = reply(
+        # A fixed floor must still accept fresh seq=3 after fresh seq=5. Using
+        # the moving high-water mark here would silently discard valid tail.
+        body=ndjson(res_ack(), old, late_fresh, fresh, terminal), end_body=False,
+    )
+    subscription = ([reply(status=400, body=b'{"error":"invalid_params"}'), coalesced]
+                    if reject_resume else [coalesced])
+    ws1 = NoiseWebSocket(Responder(chat_table()))
+    ws2 = NoiseWebSocket(Responder(chat_table(subscribe=subscription)))
+    opener = SequenceOpener([ws1, ws2])
+    events = []
+    async with hatched(script, opener=opener, reconnect_backoff=0.0) as client:
+        await client.connect()
+        task = asyncio.create_task(consume(client, events))
+        await until(lambda: client._sub_stream_id is not None, what="first subscribe")
+        stale = client._sub_stream_id
+        first = ev(2, text="already delivered")
+        first["chat_event_seq"] = 2
+        ws1.push(stale, ndjson(res_ack(), first))
+        await until(lambda: client._last_seen_seq == 2, what="first text consumed")
+        ws1.die()
+        await asyncio.wait_for(task, 2.0)
+        assert [e["text"] for e in events if e.get("kind") == "delta"] == [
+            "already delivered", "new tail",
+        ]
+        assert len([e for e in events if e.get("name") == "res"]) == 1
+        assert [e["seq"] for e in events if "seq" in e] == [2, 5, 3, 4]
+        assert client._last_seen_seq == 5
+        assert client._last_seen_chat_seq == 5
+        assert stale not in client.responses
+        assert client._turn_complete
+        requests = subscribe_frames(ws2)
+        assert len(requests) == (2 if reject_resume else 1)
+        assert body_of(requests[0])["after_stream_seq"] == 2
+        if reject_resume:
+            assert body_of(requests[1]) == {}
+
+
+async def test_partial_consume_close_commits_each_complete_byte_line():
+    """Closing at yield cannot replay that event or consume its unread sibling."""
+    async with plain_client({"/chat/subscribe": reply(end_body=False)}) as (client, ws):
+        stream_id = await client.subscribe()
+        first = ndjson(ev(1, text="甲"))
+        second = ndjson(ev(2, text="乙"))
+        malformed = b'{broken json}\r\n'
+        partial = ndjson(ev(3, text="丙"))[:-1]
+        ws.push(stream_id, malformed + first + second + partial)
+        await until(lambda: len(client.responses[stream_id].body)
+                    == len(malformed + first + second + partial), what="coalesced body")
+        stream = client.read_stream(timeout=0.5)
+        assert (await anext(stream))["text"] == "甲"
+        await stream.aclose()
+        assert client._scan_offset == len(malformed + first)
+        assert client._last_seen_seq == 1
+
+        continuation = client.read_stream(timeout=0.5)
+        assert (await anext(continuation))["text"] == "乙"
+        await continuation.aclose()
+        assert client._scan_offset == len(malformed + first + second)
+        assert client._last_seen_seq == 2
+
+        # No complete third line has been consumed. Complete it later and append
+        # terminal status: both must arrive exactly once on the no-prompt read.
+        ws.push(stream_id, b'\n' + ndjson(ev(4, activity="online")))
+        remaining = await drain(client.read_stream(timeout=0.5))
+        assert [e["seq"] for e in remaining] == [3, 4]
+        assert client._last_seen_seq == 4
+        assert client._scan_offset == len(client.responses[stream_id].body)
+
+
+async def test_failed_reconnect_reclaims_dead_subscription_response_only():
+    """Exhausting retries must not retain the old subscription's growing body."""
+    script = ScriptedHTTP({
+        ("GET", "/api/session"): [http_json(session_json())],
+        ("POST", "/api/hatch/token"): [http_json(TOKEN_BODY)],
+    })
+    ws1 = NoiseWebSocket(Responder(chat_table()))
+    opener = SequenceOpener([ws1], fail_after=1)
+    async with hatched(script, opener=opener, max_reconnects=1,
+                       reconnect_backoff=0.0) as client:
+        await client.connect()
+        await client.subscribe()
+        stale = client._sub_stream_id
+        other = client.next_stream + 100
+        client.responses[other] = retained = type(client.responses[stale])()
+        ws1.die()
+        await until(lambda: client._connection_lost(), what="receiver disconnected")
+        with pytest.raises(ProtocolError, match="断线重连失败"):
+            await drain(client.read_stream(timeout=0.5))
+        assert stale not in client.responses
+        assert client.responses[other] is retained
+
+
+async def test_preamble_reconnect_filters_coalesced_old_events_before_new_prompt():
+    """The next-turn repair path needs the same fixed floor as mid-turn repair."""
+    script = ScriptedHTTP({
+        ("GET", "/api/session"): [http_json(session_json())],
+        ("POST", "/api/hatch/token"): [http_json(TOKEN_BODY)],
+    })
+    ws1 = NoiseWebSocket(Responder(chat_table()))
+    coalesced = reply(body=ndjson(
+        res_ack(), ev(1, text="old turn"), ev(2, text="new turn"),
+        ev(3, activity="online"),
+    ), end_body=False)
+    ws2 = NoiseWebSocket(Responder(chat_table(subscribe=[coalesced])))
+    opener = SequenceOpener([ws1, ws2])
+    async with hatched(script, opener=opener, reconnect_backoff=0.0) as client:
+        await client.connect()
+        await client.subscribe()
+        ws1.push(client._sub_stream_id, ndjson(ev(1, text="old turn")))
+        prior = client.read_stream(timeout=0.5)
+        assert (await anext(prior))["text"] == "old turn"
+        await prior.aclose()
+        ws1.die()
+        await until(lambda: client._connection_lost(), what="idle disconnect")
+        events = await drain(client.read_stream("next", timeout=0.5))
+        assert [event["seq"] for event in events] == [2, 3]
+        assert [event["text"] for event in events if event.get("kind") == "delta"] == ["new turn"]
+        assert body_of(subscribe_frames(ws2)[0])["after_stream_seq"] == 1
+        assert client._turn_complete

@@ -1,3 +1,14 @@
+## 2026-11-13 — 取消协议取证与订阅恢复修复
+
+- 从前端路由/调用/序列化链确认 POST /chat/cancel，主会话 JSON {}，thread 只带 session_id，不带 node_id。
+- 新增显式 cancel_chat，严格区分布尔 cancelled ACK 与 false/未知；不绑定普通 close，不自动重试。
+- 修降级重订阅跳掉首包新尾部；逐行提交字节游标，避免提前关闭或正常终态后重复消费。
+- 去重之后推进双游标，前奏重连沿用固定 floor；重连失败也清理已知旧订阅响应。
+- 新增 17 条回归，全量 1761 passed，ruff 全绿。取消活网两次均停在 connect 阶段，未发提问/取消，未宣称成功。
+- 报告见 docs/2026-11-13_cancel-resume-report.md；仍未证明部署端取消范围与 resume 双游标边界。
+
+---
+
 ## 2026-11-13 — 协议收发与终止语义加固
 
 - request 超时/取消回收响应及 waiter，subscribe 取消不留残余；未知/迟到响应不重建缓存。

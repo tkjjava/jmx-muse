@@ -1454,6 +1454,28 @@ class HatchProtocolClient:
         return payload if isinstance(payload, dict) else {"result": payload}
 
     # ------------------------------------------------------------ RPC 面
+    async def cancel_chat(
+        self, *, session_id: str | None = None, timeout: float = 30.0
+    ) -> dict:
+        """Explicit POST /chat/cancel; never implicitly cancel on disconnect.
+
+        Static frontend evidence: 24thn7in_976_.js chat.cancel/a2 assembles
+        {} for the main route, {session_id} for a thread. It does NOT send node_id.
+        Route mapping in 3qzcufyl9d94_.js is noiseOnly POST /chat/cancel.
+        A main-route cancellation may affect other clients sharing that session:
+        callers must choose the scope explicitly, not infer it from a device ID.
+        cancelled=False is a legitimate no-op, not evidence of a successful stop.
+        """
+        body: dict[str, str] = {}
+        if session_id is not None:
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise ProtocolError("取消会话的 session_id 必须是非空字符串")
+            body["session_id"] = session_id
+        result = await self._request_json("POST", "/chat/cancel", body, timeout)
+        if not isinstance(result.get("cancelled"), bool):
+            raise ProtocolError("chat.cancel 响应缺少布尔 cancelled，无法确认取消结果")
+        return result
+
     async def register_capabilities(self, caps: list[str] | None = None) -> dict:
         """POST /client/register-capabilities：body 只有 `client_id`。
 
@@ -1645,7 +1667,12 @@ class HatchProtocolClient:
             raise ProtocolError(
                 f"连接已断开且未启用重连：{self._disconnect_reason or '原因未知'}"
             )
-        stale = self._sub_stream_id  # connect() 会把它清掉，先留住旧流 id
+        stale = self._sub_stream_id
+        # This subscription belongs to the dead connection. Reclaim it even if
+        # reconnect/auth ultimately fails; unrelated one-shot responses stay owned
+        # by their request callers. Stream ids remain monotonic across reconnect.
+        if stale is not None:
+            self.responses.pop(stale, None)
         reason = self._disconnect_reason or "连接已失效"
         last_error = "未发起"
         while self._reconnect_count < self.max_reconnects:
@@ -1673,16 +1700,11 @@ class HatchProtocolClient:
                     )
                 except ProtocolError as exc:
                     # 两段式降级：服务端不认 resume 字段时，退回真机实测过的
-                    # `{}` 订阅。重放可能随后才到，所以这里 `_seek_to_end`
-                    # 只是顺手跳掉"已经到了的那部分"，真正的去重由调用方按
-                    # seq 游标做（`read_stream` 的 resume_floor）。
+                    # `{}` 订阅。响应头 body 可能已同时带有旧事件和新尾部，
+                    # 不能 seek 到末尾丢掉新事件；调用方始终按重连前固定的
+                    # resume_floor 过滤，和回包到达时机无关。
                     last_error = f"resume 订阅被拒（{exc}）"
                     await self.subscribe()
-                    if self._sub_stream_id is not None:
-                        self._seek_to_end(self._sub_stream_id)
-                if stale is not None:
-                    # 旧流属于死连接：留着只会让未来的排查对着两具尸体。
-                    self.responses.pop(stale, None)
                 return True
             except ProtocolAuthError:
                 # 401 / 续签失败是终态：重试只会把同一个 401 再打两遍，还会把
@@ -1760,6 +1782,10 @@ class HatchProtocolClient:
         self._reconnect_count = 0
         self._idle_timeout_hit = False
         self._turn_complete = False
+        # Keep the replay floor fixed at the last accepted cursor even when the
+        # reconnect happens during preamble rather than inside the read loop.
+        resume_floor = -1
+        skip_ack = False
         if prompt is not None:
             target = node_id or self.node_id
             # 已存在的订阅才需要"只看本轮增量"：长连接跨回合，上一回合没消费完的
@@ -1775,10 +1801,10 @@ class HatchProtocolClient:
                 # 空闲期就断了（上一回合结束后服务端/代理把 WS 关了）：先把连接
                 # 修好再发消息。这里**不**重发 /chat/stream —— 它没有幂等键，
                 # 发送失败后盲目重发会把一次提问变成两条。
-                if not await self._resume_subscription(
-                    resume_after=self._last_seen_seq
-                ):
+                resume_floor = self._last_seen_seq
+                if not await self._resume_subscription(resume_after=resume_floor):
                     return
+                skip_ack = True
             else:
                 try:
                     await self._ensure_preamble(target)
@@ -1788,10 +1814,10 @@ class HatchProtocolClient:
                     # 悄悄替调用方建一条连接。
                     if not (self._ever_connected and self._connection_lost()):
                         raise
-                    if not await self._resume_subscription(
-                        resume_after=self._last_seen_seq
-                    ):
+                    resume_floor = self._last_seen_seq
+                    if not await self._resume_subscription(resume_after=resume_floor):
                         return
+                    skip_ack = True
             await self._post_message(prompt, references, target)
 
         if self._sub_stream_id is None:
@@ -1802,13 +1828,9 @@ class HatchProtocolClient:
         # idle 判定的基准：最后一次"body 真的长了"的时刻。轮询空转不刷新它。
         last_progress = time.monotonic()
         last_size = -1
-        # resume 本地去重基线：-1 = 本回合还没发生过重连。重连时置成"断线前
-        # 已消费的最大 seq"，重放里 <= 它的事件一律丢弃（服务端按"包含游标"
-        # 重放时也不会重复正文，语义边界未真机验证，所以两边都防）。
-        resume_floor = -1
-        # 重订阅流的第一行 `res` 是这条**新流**的 ack，不是本回合的事件：
-        # 丢掉它，免得同一回合出现两个 res。
-        skip_ack = False
+        # Replay uses the fixed pre-reconnect floor, not the moving maximum:
+        # out-of-order fresh events above the floor remain deliverable. The first
+        # valid event may be a subscription ack, which is not a turn event.
         while not self.closing:
             if deadline is not None and time.monotonic() >= deadline:
                 return
@@ -1836,11 +1858,14 @@ class HatchProtocolClient:
                 last_progress = time.monotonic()
             cut = raw.rfind(b"\n", self._scan_offset)
             if cut >= 0:
-                for line in raw[self._scan_offset : cut].splitlines():
+                # Commit each complete line before yielding or discarding it.
+                # A consumer can aclose() while paused at yield; batch-end-only
+                # offsets would replay that already delivered event on the next read.
+                for line in raw[self._scan_offset : cut + 1].split(b"\n")[:-1]:
+                    self._scan_offset += len(line) + 1
                     event = self._parse_event(line)
                     if event is None:
                         continue
-                    self._track_cursors(event)
                     if skip_ack:
                         skip_ack = False
                         if str(event.get("name") or "") == "res":
@@ -1851,6 +1876,10 @@ class HatchProtocolClient:
                             # 服务端把已消费的事件又发了一遍（或按包含游标重放）：
                             # 本地挡住 —— 正文/状态都不会重复。
                             continue
+                    # Only accepted events advance resume cursors. An old replay
+                    # can carry a different chat_event_seq and must not move the
+                    # second cursor past data that this consumer never applied.
+                    self._track_cursors(event)
                     payload = event.get("payload")
                     context = payload.get("chat_context") if isinstance(payload, Mapping) else None
                     device = context.get("device_id") if isinstance(context, Mapping) else None
