@@ -28,8 +28,11 @@
   `/v1/chat/completions` 非流式 200/complete、流式 4 chunk + `[DONE]` + usage；
   路由 `muse-bridge`，bridge 计数 `protocol_driver_built` 2→3。一次 relay 进程
   在首个请求中无 traceback 消失（原因未查明），重启后稳定。
-- 证据见 docs/2026-11-14_history-recovery-probe.md 与
-  docs/2026-11-14_stack-acceptance-report.md。
+- 交付包重打（2026-11-14）：bridge 树 181 文件（HEAD `0b59953`）、解压后包内
+  全量测试 1930 passed；relay zip 与旧包逐字节一致（源码未变）。Stack 新
+  SHA-256 `5f7f9ed9…b03c`，旧包备份于 `tmp/packages-prev-20261112/`。
+- 证据见 docs/2026-11-14_history-recovery-probe.md、
+  docs/2026-11-14_stack-acceptance-report.md 与 docs/2026-11-14_delivery-build.md。
 
 ---
 
