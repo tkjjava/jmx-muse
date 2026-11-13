@@ -1,3 +1,50 @@
+## 2026-11-13 — 借鉴 sub2api：选号评分器（纯函数）+ 测试环境隔离
+
+### 新增：`muse_bridge/scheduler.py`（不接线，零行为变更）
+
+对照 `Wei-Shaw/sub2api`（LGPL-3.0）的调度**设计**（只取思路，代码按本项目风格重写）
+实现选号评分器，替换将来要淘汰的取模轮转 `pool._rotate()`：
+
+- **8 因子加权评分**：优先级 / 负载 / 排队 / EWMA 错误率 / TTFT / 配额窗口剩余 /
+  剩余额度 / 粘性加分。全部在**本批候选内** `(x-min)/(max-min)` 归一化，账号数
+  从 1 涨到 100 都不用调参；`max==min` 走中性分支，不除零。
+- **TopK + 加权随机打散**：权重 `(score-min)+1`，避免单一最高分账号长期垄断
+  （纯贪心会让全部请求压一台，它一抖全线受影响）。同 seed 结果可复现。
+- **TTFT 无样品取中性 0.5**：给 1 会把新号瞬间打满，给 0 会让新号永远选不上。
+- **硬闸门**：`error_rate > max_error_rate` 的账号直接不参与评分；NaN 错误率同样
+  被排除（NaN 参与比较全是 False，会静默毁掉排序）。
+- **权重置 0 = 该项完全不参与**，便于逐项灰度。
+- `explain()` 把每个候选的分数摊开，供 doctor / 诊断端点回答"为什么选了这个号"。
+
+### 修复：运维环境变量污染测试（21 个用例变红）
+
+机器重启后 `test_protocol_driver` / `test_protocol_staging` / `test_concurrency`
+共 21 条"全离线"用例真的发起了网络连接并拿到 401。
+
+根因：部署说明里的 `MUSE_PROTOCOL_DRIVER=1`、`MUSE_WARM_POOL=1`、
+`MUSE_PROTOCOL_PROXY` 等写进了**用户级环境变量**（这是给生产用的），重启后测试
+进程继承了它们，`ProtocolDriver.connect()` 于是走暖池分支，把测试注入的假 client
+覆盖成真 client。
+
+修法：新增 `tests/conftest.py`，autouse fixture 在每个用例前删掉这批运行态变量
+（`monkeypatch` 用完自动还原），需要它们的用例照旧自己 `setenv`。
+**单元测试的输入必须来自测试自己，不能来自操作者的机器配置。**
+
+### 验证
+
+- 全量：`1658 passed`（原 1639 + 新增 19 条调度器测试），全绿。
+- 因果确认：把 `MUSE_WARM_POOL=1` / `MUSE_PROTOCOL_DRIVER=1` 显式塞回环境后，
+  `test_protocol_driver + test_concurrency` 仍 `65 passed`（说明不是碰巧）。
+- `ruff check muse_bridge tests` → All checks passed。
+
+### 未做（需明确指令）
+
+评分器**尚未接进 `pool.py` 的派单路径**。接线会改变线上选号行为，按报告
+`work/SUB2API-学习借鉴.md` §6 的顺序：先加 `MUSE_SCHEDULER=legacy|score` 开关双跑，
+观察一致后再切默认；粘性会话与探针预算排在其后。
+
+---
+
 # 更新日志
 
 ## 时间约定（先说清楚，免得被当成精确时刻）
