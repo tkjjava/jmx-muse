@@ -24,7 +24,12 @@
 - 本机栈重新拉起并冒烟：`restart_bridge.py` 起 8788（version=0.4.2，driver=protocol），
   探针过期导致 0/1 可派单，`refresh_account.py` 后 1/1；经桥聊天 200、协议驱动、
   无回退（17.19s）。relay 8765 未启动，未做线上断线注入。
-- 证据见 docs/2026-11-14_history-recovery-probe.md。
+- 栈端到端验收：relay 1.13.4 起 8765 后，临时 client key（用后即删）经
+  `/v1/chat/completions` 非流式 200/complete、流式 4 chunk + `[DONE]` + usage；
+  路由 `muse-bridge`，bridge 计数 `protocol_driver_built` 2→3。一次 relay 进程
+  在首个请求中无 traceback 消失（原因未查明），重启后稳定。
+- 证据见 docs/2026-11-14_history-recovery-probe.md 与
+  docs/2026-11-14_stack-acceptance-report.md。
 
 ---
 
