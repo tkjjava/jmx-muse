@@ -1128,7 +1128,8 @@ NoiseTransportFrame            ← 分片层：chunk_id / chunk_index / total_ch
 
 | 部分 | 状态 | 证据 |
 |---|---|---|
-| `noise.py` / `proto.py` / `ws_fallback.py` | 离线单测 + 与两份独立实现字节级对拍 | `tests/test_noise.py`、`tests/test_proto.py`、`tests/test_ws_fallback.py` |
+| `noise.py` / `proto.py` | 离线单测 + 与独立实现字节级对拍 | `tests/test_noise.py`、`tests/test_proto.py` |
+| `ws_fallback.py` | 代理 TLS 顺序、失败/取消清理及可信证书回环集成测试 | `tests/test_ws_fallback_proxy.py`、`tests/test_ws_fallback_tls_integration.py`；历史表格的 `test_ws_fallback.py` 在当前树中不存在，不再引用为证据 |
 | `protocol_client.py`（bootstrap / HTTP-over-Noise / 事件流 / `/fs/*`） | 离线单测（假 WS 帧、假 responses 表） | `tests/test_protocol_client.py` |
 | `protocol_generation.py`（生成编排） | 离线单测：未证实端点必抛、`workspace/user/` 回声必挡、直链取件必抛、done 后 12 秒宽限 | `tests/test_protocol_generation.py` |
 | `protocol_engine.py`（语义参考层） | 离线单测：提示词措辞、错误分类 | `tests/test_protocol_engine.py` |

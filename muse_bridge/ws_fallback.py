@@ -286,26 +286,62 @@ def _split_proxy(proxy: str) -> tuple[str, int]:
     return host, int(port or "80")
 
 
+async def _read_http_head(
+    reader: asyncio.StreamReader, stage: str
+) -> tuple[int, dict[str, str]]:
+    """Bound header bytes as well as time (the caller owns the deadline).
+
+    Never copy a peer's status line into errors: it may echo the token URL.
+    """
+    size = 0
+    status: int | None = None
+    fields: dict[str, str] = {}
+    while True:
+        line = await reader.readline()
+        size += len(line)
+        if size > 64 * 1024:
+            raise WebSocketProtocolError(f"{stage} headers exceed 65536 bytes")
+        if not line:
+            raise WebSocketProtocolError(f"{stage} headers ended prematurely")
+        if status is None:
+            parts = line.split(None, 2)
+            if (len(parts) < 2 or parts[0] not in (b"HTTP/1.0", b"HTTP/1.1")
+                    or len(parts[1]) != 3 or not parts[1].isdigit()):
+                raise WebSocketProtocolError(f"{stage} invalid HTTP status")
+            status = int(parts[1])
+        elif line in (b"\r\n", b"\n"):
+            return status, fields
+        else:
+            name, separator, value = line.partition(b":")
+            if not separator:
+                raise WebSocketProtocolError(f"{stage} invalid HTTP header")
+            fields[name.decode("latin-1").strip().lower()] = value.decode("latin-1").strip()
+
+
 async def _proxy_tunnel(
     proxy: str, host: str, port: int, timeout: float
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """向 HTTP 代理发 CONNECT，拿一条裸 TCP 通道。socks 不支持（见模块头）。"""
-    phost, pport = _split_proxy(proxy)
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_connection(phost, pport), timeout
-    )
-    request = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
-    writer.write(request.encode("ascii"))
-    await writer.drain()
-    line = await asyncio.wait_for(reader.readline(), timeout)
-    if not line.startswith(b"HTTP/1.") or b" 200" not in line.split(b"\r\n")[0]:
-        writer.close()
-        raise WebSocketProtocolError(f"proxy CONNECT failed: {line!r}")
-    while True:
-        spare = await reader.readline()
-        if spare in (b"\r\n", b"\n", b""):
-            break
-    return reader, writer
+    """CONNECT creates a plain tunnel; wss must upgrade it to TLS before GET."""
+    writer: asyncio.StreamWriter | None = None
+    try:
+        async with asyncio.timeout(timeout):
+            phost, pport = _split_proxy(proxy)
+            reader, writer = await asyncio.open_connection(phost, pport)
+            request = f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+            writer.write(request.encode("ascii"))
+            await writer.drain()
+            status, _ = await _read_http_head(reader, "proxy CONNECT")
+            if status != 200:
+                raise WebSocketProtocolError(f"proxy CONNECT failed (HTTP {status})")
+        return reader, writer
+    except BaseException as exc:
+        if writer is not None:
+            await _abort(writer)
+        if isinstance(exc, (asyncio.CancelledError, WebSocketProtocolError)):
+            raise
+        if isinstance(exc, Exception):
+            raise WebSocketProtocolError(f"proxy CONNECT failed ({type(exc).__name__})") from None
+        raise
 
 
 async def connect(
@@ -326,76 +362,88 @@ async def connect(
     `close_timeout` 只是签名兼容用：这里的关闭是直接写 close 帧后 await
     wait_closed()，没有独立的定时器需要它。
     """
-    parts = urlsplit(url)
-    if parts.scheme not in ("ws", "wss"):
-        raise WebSocketProtocolError(f"unsupported scheme {parts.scheme!r}")
-    secure = parts.scheme == "wss"
-    host = parts.hostname
-    if not host:
-        raise WebSocketProtocolError(f"websocket url has no host: {url!r}")
-    port = parts.port or (443 if secure else 80)
-    path = parts.path or "/"
-    if parts.query:
-        path = f"{path}?{parts.query}"
+    writer: asyncio.StreamWriter | None = None
+    stage = "URL validation"
+    try:
+        # One budget covers TCP, CONNECT headers, TLS and HTTP Upgrade. Slow
+        # peers cannot reset it by sending one more header line each time.
+        async with asyncio.timeout(open_timeout):
+            parts = urlsplit(url)
+            if parts.scheme not in ("ws", "wss"):
+                raise WebSocketProtocolError("unsupported websocket scheme")
+            secure = parts.scheme == "wss"
+            host = parts.hostname
+            if not host:
+                raise WebSocketProtocolError("websocket URL has no host")
+            port = parts.port or (443 if secure else 80)
+            path = parts.path or "/"
+            if parts.query:
+                path = f"{path}?{parts.query}"
 
-    if secure:
-        context = ssl_context or ssl.create_default_context()
-        kwargs = {"host": host, "port": port, "ssl": context}
-    else:
-        kwargs = {"host": host, "port": port}
+            context = (ssl_context or ssl.create_default_context()) if secure else None
+            stage = "proxy CONNECT" if proxy else "TCP/TLS connect"
+            if proxy:
+                reader, writer = await _proxy_tunnel(proxy, host, port, open_timeout)
+                if secure:
+                    stage = "TLS handshake"
+                    # CONNECT only establishes TCP. Authenticate the destination
+                    # before sending a GET whose query can contain auth_token.
+                    await writer.start_tls(
+                        context, server_hostname=host,
+                        ssl_handshake_timeout=open_timeout,
+                    )
+            else:
+                kwargs = {"host": host, "port": port}
+                if secure:
+                    kwargs.update(ssl=context, server_hostname=host)
+                reader, writer = await asyncio.open_connection(**kwargs)
 
-    if proxy:
-        reader, writer = await _proxy_tunnel(proxy, host, port, open_timeout)
-    else:
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(**kwargs), open_timeout
-        )
-
-    key = base64.b64encode(os.urandom(16)).decode("ascii")
-    headers = {
-        "Upgrade": "websocket",
-        "Connection": "Upgrade",
-        "Sec-WebSocket-Key": key,
-        "Sec-WebSocket-Version": "13",
-        "Host": f"{host}:{port}",
-    }
-    if origin:
-        headers["Origin"] = origin
-    if user_agent:
-        headers["User-Agent"] = user_agent
-    if subprotocols:
-        headers["Sec-WebSocket-Protocol"] = ", ".join(subprotocols)
-    for name, value in (additional_headers or {}).items():
-        headers[name] = value
-    blob = f"GET {path} HTTP/1.1\r\n" + "".join(
-        f"{name}: {value}\r\n" for name, value in headers.items()
-    ) + "\r\n"
-    writer.write(blob.encode("ascii"))
-    await writer.drain()
-
-    status_line = await asyncio.wait_for(reader.readline(), open_timeout)
-    if not status_line.startswith(b"HTTP/1.1 101") and not status_line.startswith(
-        b"HTTP/1.0 101"
-    ):
-        await _abort(writer)
-        raise WebSocketProtocolError(
-            f"handshake rejected: {status_line.decode('latin-1').strip()!r}"
-        )
-    fields: dict[str, str] = {}
-    while True:
-        line = await asyncio.wait_for(reader.readline(), open_timeout)
-        if line in (b"\r\n", b"\n", b""):
-            break
-        name, _, value = line.partition(b":")
-        fields[name.decode("latin-1").strip().lower()] = value.decode("latin-1").strip()
-    if fields.get("sec-websocket-accept") != build_accept(key):
-        # 规则 2：accept 对不上就说明对面不是 WS 服务，后面所有解析都是幻觉。
-        await _abort(writer)
-        raise WebSocketProtocolError("handshake accept value mismatch")
-    return WebSocket(reader, writer, max_size=max_size)
+            stage = "WebSocket Upgrade"
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            headers = {
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Key": key,
+                "Sec-WebSocket-Version": "13",
+                "Host": f"{host}:{port}",
+            }
+            if origin:
+                headers["Origin"] = origin
+            if user_agent:
+                headers["User-Agent"] = user_agent
+            if subprotocols:
+                headers["Sec-WebSocket-Protocol"] = ", ".join(subprotocols)
+            headers.update(additional_headers or {})
+            blob = f"GET {path} HTTP/1.1\r\n" + "".join(
+                f"{name}: {value}\r\n" for name, value in headers.items()
+            ) + "\r\n"
+            writer.write(blob.encode("ascii"))
+            await writer.drain()
+            status, fields = await _read_http_head(reader, "WebSocket Upgrade")
+            if status != 101:
+                raise WebSocketProtocolError(f"handshake rejected (HTTP {status})")
+            if fields.get("sec-websocket-accept") != build_accept(key):
+                raise WebSocketProtocolError("handshake accept value mismatch")
+        return WebSocket(reader, writer, max_size=max_size)
+    except BaseException as exc:
+        if writer is not None:
+            await _abort(writer)
+        if isinstance(exc, (asyncio.CancelledError, WebSocketProtocolError)):
+            raise
+        if isinstance(exc, Exception):
+            # Do not expose raw SSL/proxy/response text or the credential URL.
+            raise WebSocketProtocolError(f"{stage} failed ({type(exc).__name__})") from None
+        raise
 
 
 async def _abort(writer: asyncio.StreamWriter) -> None:
     writer.close()
-    with contextlib.suppress(OSError, ssl.SSLError, EOFError):
-        await writer.wait_closed()
+    try:
+        # A failed TLS peer may never acknowledge shutdown. Cleanup has a
+        # separate bounded grace; it must not hang a cancelled bootstrap.
+        async with asyncio.timeout(1.0):
+            await writer.wait_closed()
+    except (OSError, ssl.SSLError, EOFError, TimeoutError):
+        transport = getattr(writer, "transport", None)
+        if transport is not None:
+            transport.abort()

@@ -1,3 +1,15 @@
+## 2026-11-13 — 代理 WSS 兜底 TLS 与资源清理
+
+- 修复标准库兜底在 HTTP CONNECT 后漏升 TLS：WSS 必须验证证书/主机名后才发带 token 的 GET；WS 不自动升级或降级。
+- 单次 open_timeout 覆盖 TCP/CONNECT/TLS/Upgrade，HTTP 头限制 64KiB，超时/取消关闭未移交的 writer。
+- 错误只保留安全类别/状态，不回显对端状态行、响应头或 token URL。
+- 新增 19 条回归，含真实可信证书回环、主机名拒绝、Ping/Pong/二进制往返；全量 1799 passed，ruff 全绿。
+- 修复后显式代理+标准库兜底真实连通至 Noise XX，4.152 秒，未发送聊天。
+- 默认后端本次自发回合取消返回 cancelled=true 并识别终态，13.604 秒；未观察到 interrupted，不外推后台停机保证。
+- 证据见 docs/2026-11-13_proxy-tls-report.md；兜底缺陷不被当作此前默认后端 Upgrade 502 的已证实原因。
+
+---
+
 ## 2026-11-13 — Upgrade 故障定位与握手取消清理
 
 - WebSocket Upgrade 失败保留安全的数字 HTTP 状态码，兼容当前/旧版异常元数据，不输出原始异常或 token URL。
