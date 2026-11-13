@@ -128,6 +128,25 @@ event: {seq:int, event_name:"message.assistant"|"message.user",
 结束，客户端收到完整 456 字，与已提交历史的长度一致；恢复计数与尾部补发计数
 各 +1。这条证据把引擎、驱动、HTTP 三层串起来了。
 
+### 线上部署冒烟（本机 8788，当前代码）
+
+验证时本机栈处于停止状态（8788/8765 均无监听），因此不是"重启"而是重新拉起：
+
+1. `python tools/restart_bridge.py --log data/bridge.log` 起服务（relay 8765 仍未起）；
+2. `/healthz` 报 `version=0.4.2 driver=protocol`，但 `accounts_dispatchable=0/1`——
+   复制自旧库的探针时间戳过期；`tools/refresh_account.py` 刷新后回到 1/1；
+3. 冒烟一条聊天（经桥 HTTP 面，非直连协议）：
+
+```json
+{"status": 200, "driver": "protocol", "content_len": 2,
+ "finish_reason": "stop", "elapsed_s": 17.19,
+ "counters": {"protocol_driver_built": 1, "browser_driver_built": null,
+              "protocol_fallback": null}}
+```
+
+即：运行中的 bridge 走协议驱动、无浏览器回退、请求正常收尾。断线恢复行为本身
+仍由上面的隔离实例实测负责——当前线上没有可控代理，不人为制造线上断线。
+
 ## 恢复接线
 
 `ProtocolEngine(history_recovery=True)`（默认）：

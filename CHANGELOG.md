@@ -21,6 +21,9 @@
 - bridge 级隔离实测（`tools/bridge_disconnect_probe.py`）：复制库起独立 bridge +
   自建 CONNECT 中继，回答中途掐断上游连接后，SSE 仍 `finish_reason=stop`、正文
   456 字与已提交历史一致、恢复计数与尾部补发计数各 +1。不碰生产实例。
+- 本机栈重新拉起并冒烟：`restart_bridge.py` 起 8788（version=0.4.2，driver=protocol），
+  探针过期导致 0/1 可派单，`refresh_account.py` 后 1/1；经桥聊天 200、协议驱动、
+  无回退（17.19s）。relay 8765 未启动，未做线上断线注入。
 - 证据见 docs/2026-11-14_history-recovery-probe.md。
 
 ---
