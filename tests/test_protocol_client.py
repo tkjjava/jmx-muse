@@ -1533,7 +1533,8 @@ async def test_protocol_constants_and_capabilities_are_stable():
     assert DISPLAY_NAME == "muse-bridge"
     client = HatchProtocolClient(COOKIES)
     assert client.heartbeat_interval == 30.0
-    assert client.handshake_timeout == 30.0
+    assert client.ws_open_timeout == 30.0
+    assert client.handshake_timeout == 10.0
     assert client.wake_verify_tries == 1
     assert client.capabilities == list(DEFAULT_CAPABILITIES)
 

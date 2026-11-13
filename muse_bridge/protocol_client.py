@@ -755,7 +755,10 @@ class HatchProtocolClient:
         # （SSLV3_ALERT_HANDSHAKE_FAILURE），只作为未来 LB 切换的备选开关。
         self.use_endpoint_ws_host = False
         self.heartbeat_interval = 30.0
-        self.handshake_timeout = 30.0
+        self.ws_open_timeout = 30.0
+        # Frontend handshake perform() shares one 10s deadline across all phases;
+        # WebSocket upgrade has its own budget and precedes Noise.
+        self.handshake_timeout = 10.0
         # 与上游一致：受理之后立即确认一次。真机冷启动常超过一个 RTT，
         # 需要更稳的部署把它调大；默认值不擅自放大，每次确认都是真实请求。
         self.wake_verify_tries = 1
@@ -1110,7 +1113,13 @@ class HatchProtocolClient:
                 f"Noise WebSocket 连接失败（{type(exc).__name__}{detail}）"
             ) from None
         try:
-            await self._noise_handshake(vm_type)
+            try:
+                async with asyncio.timeout(self.handshake_timeout) as budget:
+                    await self._noise_handshake(vm_type)
+            except TimeoutError:
+                if not budget.expired():
+                    raise
+                raise ProtocolError("Noise 握手总预算已到期") from None
         except BaseException:
             # asyncio.CancelledError is not an Exception. A deadline/caller cancel
             # during msg1/msg2/msg3 must retire this partial cryptographic session.
@@ -1129,9 +1138,13 @@ class HatchProtocolClient:
         except Exception:
             payload = b"\x0a\x20" + secrets.token_bytes(32)
         await self._ws_send(noise.msg1(payload))
-        msg2 = await asyncio.wait_for(self._ws_recv(), self.handshake_timeout)
+        msg2 = await self._ws_recv()
         if not isinstance(msg2, (bytes, bytearray)):
             raise ProtocolError("Noise 握手期间收到文本帧")
+        # Frontend maxMessageBytes=65535, before readMessage2/crypto processing.
+        # The transport max_size is larger because post-handshake frames differ.
+        if len(msg2) > 65535:
+            raise ProtocolError("Noise 握手消息超过 65535 字节上限")
         challenge = noise.read_msg2(bytes(msg2))
         if challenge and "confidential" in vm_type:
             raise ProtocolError(
