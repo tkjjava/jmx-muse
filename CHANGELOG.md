@@ -1,3 +1,14 @@
+## 2026-11-14 — `chat.history` 恢复接口取证（未接入）
+
+- 前端静态证据：断线恢复走 `GET /chat/history`（参数 limit/transcript_mode/[session_id]），
+  按 chat_events seq 合并、transcript_revision 防覆盖；非 live 补发。
+- 新增最小客户端 `chat_history()`（1..200 limit、GET+query+空 body、信封解包）及 8 条帧级回归。
+- 两次活网尝试均停在连接阶段（4.4–5.5 秒 ProtocolError），未取得响应形状；
+  因此不接入自动恢复，保持"重连后无权威完成即报不完整"的保守策略。
+- 证据见 docs/2026-11-14_history-recovery-probe.md；下一步在线路可用时打印响应结构再决定。
+
+---
+
 ## 2026-11-14 — 断线续传连续性与工具化取证
 
 - 活网探针（2 次断线 + 1 次基线）：重连可建立、重复事件被去重，但断线窗口事件未补发

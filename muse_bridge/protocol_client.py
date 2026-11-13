@@ -1515,6 +1515,35 @@ class HatchProtocolClient:
             raise ProtocolError("chat.cancel 响应缺少布尔 cancelled，无法确认取消结果")
         return result
 
+    async def chat_history(
+        self,
+        *,
+        limit: int = 30,
+        session_id: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict:
+        """GET /chat/history — the frontend's recovery path after reconnect.
+
+        Static evidence: route map says httpMethod GET /chat/history; the history
+        loader calls it with `{limit, transcript_mode[, session_id]}` and merges
+        the returned `chat_events`/transcript by seq. We deliberately omit
+        `transcript_mode` until its accepted values are observed live; the
+        response shape is returned verbatim for the caller to inspect.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ProtocolError("chat.history 的 limit 必须是 1..200 的整数")
+        params: dict[str, str] = {"limit": str(limit)}
+        if session_id is not None:
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise ProtocolError("chat.history 的 session_id 必须是非空字符串")
+            params["session_id"] = session_id
+        path = "/chat/history?" + urlencode(params)
+        result = await self._request_json("GET", path, None, timeout)
+        # Frontend RPC results are envelope-shaped (`ok`/`data`); accept either
+        # the envelope or a bare payload so downstream code can stay tolerant.
+        data = result.get("data")
+        return data if isinstance(data, dict) else result
+
     async def register_capabilities(self, caps: list[str] | None = None) -> dict:
         """POST /client/register-capabilities：body 只有 `client_id`。
 
