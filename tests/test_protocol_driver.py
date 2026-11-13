@@ -297,6 +297,56 @@ async def test_stream_reply_is_string_projection_of_events():
 
 
 @pytest.mark.asyncio
+async def test_stream_events_emits_missing_tail_from_done_after_recovery():
+    """Post-reconnect recovery puts the full answer in `done`; only the missing
+    tail may be emitted so already-delivered content is never rewritten."""
+    driver, _client, _engine = make_driver(
+        [
+            {"type": "delta", "text": "9+9等于"},
+            {"type": "done", "text": "9+9等于18。"},
+        ]
+    )
+
+    events = [event async for event in driver.stream_reply_events("hi", timeout=3.0)]
+    assert events == [{"content": "9+9等于"}, {"content": "18。"}]
+    assert "".join(event["content"] for event in events) == "9+9等于18。"
+
+
+@pytest.mark.asyncio
+async def test_stream_events_emits_full_done_text_for_transcript_only_turn():
+    """message_done without deltas: the transcript text must reach the caller."""
+    driver, _client, _engine = make_driver([{"type": "done", "text": "来自 transcript"}])
+    events = [event async for event in driver.stream_reply_events("hi", timeout=3.0)]
+    assert events == [{"content": "来自 transcript"}]
+
+
+@pytest.mark.asyncio
+async def test_stream_events_does_not_emit_done_text_that_contradicts_deltas():
+    """If done text is not an extension of delivered text, deliver nothing extra."""
+    driver, _client, _engine = make_driver(
+        [
+            {"type": "delta", "text": "abc"},
+            {"type": "done", "text": "xyz"},
+        ]
+    )
+    assert [event async for event in driver.stream_reply_events("hi", timeout=3.0)] == [
+        {"content": "abc"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_reply_projection_includes_recovered_tail():
+    driver, _client, _engine = make_driver(
+        [
+            {"type": "delta", "text": "9+9等于"},
+            {"type": "done", "text": "9+9等于18。"},
+        ]
+    )
+    parts = [part async for part in driver.stream_reply("hi", timeout=3.0)]
+    assert parts == ["9+9等于", "18。"]
+
+
+@pytest.mark.asyncio
 async def test_stream_events_done_closes_retained_engine_generator(monkeypatch):
     """done returns before source exhaustion; cleanup cannot depend on source GC."""
     driver, _client, engine = make_driver()

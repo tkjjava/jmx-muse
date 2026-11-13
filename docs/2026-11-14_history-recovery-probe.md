@@ -89,6 +89,17 @@ event: {seq:int, event_name:"message.assistant"|"message.user",
 第一次实测时守卫还要求“历史最新 seq ≥ live 游标”，结果被 683 < 734 误拦；
 移除该无效比较后两次都通过。这正是“先用活网数据证伪假设”的价值。
 
+### 传到 app 层（驱动层修正）
+
+引擎把恢复文本放在 `done` 里，但驱动原来的 `stream_reply_events` 收到 `done`
+就直接返回，**丢弃了 done 的正文**——上层只会拿到断线前的截断 delta。现在驱动
+在 `done` 时补发“缺失尾部”（仅当 done 文本是已发文本的严格扩展），不重写已发
+内容、不改变上层 content 增量契约。副作用修复：`message_done` 只带 transcript
+（没有任何 delta）的回合，以前到 app 层是空回答，现在也能拿到正文。
+
+回归：4 条驱动层用例（恢复尾部、transcript-only、矛盾的 done 文本被忽略、
+字符串投影同样带尾部）。
+
 ## 恢复接线
 
 `ProtocolEngine(history_recovery=True)`（默认）：

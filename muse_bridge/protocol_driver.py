@@ -230,12 +230,14 @@ class ProtocolDriver:
         await self.connect()
         deadline = asyncio.get_running_loop().time() + timeout
         seen_paths: set[str] = set()
+        delivered: list[str] = []
         async with contextlib.aclosing(self._engine.stream_chat(prompt, timeout=timeout)) as events:
             async for event in events:
                 kind = str(event.get("type") or "")
                 if kind == "delta":
                     text = event.get("text")
                     if text:
+                        delivered.append(str(text))
                         yield {"content": str(text)}
                     continue
                 if kind == "media":
@@ -300,6 +302,20 @@ class ProtocolDriver:
                     yield {"media": [metadata]}
                     continue
                 if kind == "done":
+                    # `done` may carry the authoritative full text: transcript-only
+                    # turns (no deltas) and post-reconnect history recovery both put
+                    # the complete answer there while emitting few or no deltas.
+                    # Emitting only the missing tail keeps the pool/app contract
+                    # (content increments) and never rewrites already-delivered text.
+                    full = event.get("text")
+                    joined = "".join(delivered)
+                    if (
+                        isinstance(full, str)
+                        and full.startswith(joined)
+                        and len(full) > len(joined)
+                    ):
+                        observability.bump("chat_done_tail_emitted")
+                        yield {"content": full[len(joined):]}
                     return
                 if kind == "refused":
                     raise ProtocolRefusal(str(event.get("text") or ""))
