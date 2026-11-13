@@ -3,8 +3,9 @@
 - 前端静态证据：断线恢复走 `GET /chat/history`（参数 limit/transcript_mode/[session_id]），
   按 chat_events seq 合并、transcript_revision 防覆盖；非 live 补发。
 - 新增最小客户端 `chat_history()`（1..200 limit、GET+query+空 body、信封解包）及 8 条帧级回归。
-- 两次活网尝试均停在连接阶段（4.4–5.5 秒 ProtocolError），未取得响应形状；
-  因此不接入自动恢复，保持"重连后无权威完成即报不完整"的保守策略。
+- 三次活网尝试均未取得响应：两次停在聊天阶段，一次纯连接取历史在请求期遇到
+  `InvalidStatus HTTP 502`（瞬时握手故障，非路由被拒）。因此不接入自动恢复，
+  保持"重连后无权威完成即报不完整"的保守策略。
 - 证据见 docs/2026-11-14_history-recovery-probe.md；下一步在线路可用时打印响应结构再决定。
 
 ---
