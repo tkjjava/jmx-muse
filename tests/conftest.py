@@ -29,6 +29,7 @@ _PROTOCOL_RUNTIME_ENV = (
     "MUSE_GENERATION_ENABLED",  # 生成能力开关
     "MUSE_REPLY_TIMEOUT",       # 回合超时
     "MUSE_SCHEDULER",           # 测试显式选择调度模式
+    "MUSE_DISPATCH_MAX_ATTEMPTS",  # 测试显式设置探针预算
 )
 
 

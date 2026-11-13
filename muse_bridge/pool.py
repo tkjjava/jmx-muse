@@ -109,6 +109,15 @@ def scheduler_mode() -> str:
     return mode if mode in {"legacy", "shadow", "score"} else "legacy"
 
 
+def dispatch_attempt_limit() -> int:
+    """Zero preserves legacy behavior; invalid values also preserve it."""
+    try:
+        value = int(os.environ.get("MUSE_DISPATCH_MAX_ATTEMPTS", "0"))
+    except ValueError:
+        return 0
+    return max(0, min(value, 128))
+
+
 def _selection_order(records: list, capability: str) -> list:
     mode = scheduler_mode()
     if mode == "legacy":
@@ -282,8 +291,12 @@ async def dispatch(
     # Explicit account assignment is authoritative and never enters ranking.
     ordered = candidates if account else _selection_order(candidates, capability)
     bucket = "chat" if capability == "chat" else "generation"
+    limit = dispatch_attempt_limit()
+    attempted: set[str] = set()
     for record in ordered:
         account = record.account
+        if account in attempted:
+            continue
 
         lock = _lock_for(account)
         if lock.locked():
@@ -291,6 +304,19 @@ async def dispatch(
             busy.append(account)
             continue
 
+        # Busy/duplicate candidates consume no handshake budget. Only stop when
+        # there really is an unattempted free candidate beyond the configured cap.
+        if limit and len(attempted) >= limit:
+            observability.bump("scheduler_probe_budget_exhausted")
+            return DispatchResult(
+                ok=False,
+                verdict="dispatch_budget_exhausted",
+                note=(f"单次派单已达到 {limit} 个账号的探测预算；"
+                      "尚有未尝试的空闲账号，可稍后重试或调整 MUSE_DISPATCH_MAX_ATTEMPTS。"
+                      + (f" 最后失败：{last_error}" if last_error else "")),
+            )
+        attempted.add(account)
+        observability.bump("scheduler_account_attempts")
         # 非阻塞抢锁：抢到才是我的，抢不到就当忙处理
         await lock.acquire()
         # 抢到锁之后的一切都必须收干净：只有"成功交出去的"这次调用才保留锁，

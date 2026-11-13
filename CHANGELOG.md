@@ -1,3 +1,14 @@
+## 2026-11-13 — 单次派单账号探针预算
+
+- 新增 `MUSE_DISPATCH_MAX_ATTEMPTS`，默认 0 不设限；正整数限制不同空闲账号尝试数，最大 128。
+- 忙号不耗预算、重复号只尝试一次。单账号协议→浏览器回退仍计一次账号尝试。
+- 达上限且仍有未尝试空闲候选时返回 dispatch_budget_exhausted；聊天 API 返回 503/server_error，
+  全部已尝试失败仍保留 all_accounts_failed，全部忙仍保留 429。未尝试账号不记失败、不占锁。
+- healthz 展示有效上限，管理观测统计实际账号尝试数与预算耗尽次数。
+- 全量 1707 passed，ruff 全绿；此功能不替代网络超时或数据库复核预算，未修改线上配置。
+
+---
+
 ## 2026-11-13 — 健康调度接线与回退模式
 
 - 新增 `MUSE_SCHEDULER=legacy|shadow|score`，默认 legacy。shadow 只比较选号、不多发请求；

@@ -192,6 +192,105 @@ def test_forget_account_removes_both_capability_buckets():
     assert pool._health.snapshot("a", "generation").samples == 0
 
 
+@pytest.mark.parametrize("value,expected", [("0", 0), ("3", 3), ("-2", 0),
+                                             ("typo", 0), ("999", 128)])
+def test_attempt_limit_config(monkeypatch, value, expected):
+    monkeypatch.setenv("MUSE_DISPATCH_MAX_ATTEMPTS", value)
+    assert pool.dispatch_attempt_limit() == expected
+
+
+@pytest.mark.asyncio
+async def test_budget_stops_before_next_free_account_and_releases_locks(store, monkeypatch):
+    monkeypatch.setenv("MUSE_DISPATCH_MAX_ATTEMPTS", "1")
+    built = []
+    class Broken(Driver):
+        async def status(self):
+            return SimpleNamespace(connected=False, logged_in=False, note="offline")
+    def build(store, record, **kw):
+        built.append(record.account)
+        return Broken()
+    monkeypatch.setattr(pool, "_build_driver", build)
+    result = await pool.dispatch(store)
+    assert not result.ok and result.verdict == "dispatch_budget_exhausted"
+    assert len(built) == 1
+    assert not pool.busy_accounts()
+    names = [r.account for r in store.list_all() if r.account not in built]
+    assert pool._health.snapshot(names[0]).samples == 0
+
+
+@pytest.mark.asyncio
+async def test_busy_accounts_do_not_consume_budget(store, monkeypatch):
+    monkeypatch.setenv("MUSE_DISPATCH_MAX_ATTEMPTS", "1")
+    names = [r.account for r in store.dispatchable()]
+    lock = pool._lock_for(names[0])
+    await lock.acquire()
+    monkeypatch.setattr(pool, "_build_driver", lambda *a, **kw: Driver())
+    try:
+        result = await pool.dispatch(store)
+        assert result.ok and result.account == names[1]
+        await result.release()
+    finally:
+        lock.release()
+
+
+@pytest.mark.asyncio
+async def test_all_attempted_failure_is_not_budget_exhaustion(store, monkeypatch):
+    monkeypatch.setenv("MUSE_DISPATCH_MAX_ATTEMPTS", "1")
+    class Broken(Driver):
+        async def status(self):
+            return SimpleNamespace(connected=False, logged_in=False, note="offline")
+    monkeypatch.setattr(pool, "_build_driver", lambda *a, **kw: Broken())
+    result = await pool.dispatch(store, account="good")
+    assert result.verdict == "all_accounts_failed"
+    assert not pool.busy_accounts()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_candidates_are_attempted_once(store, monkeypatch):
+    records = store.dispatchable()
+    monkeypatch.setattr(pool, "_selection_order", lambda *a: [records[0], records[0], records[1]])
+    calls = []
+    class Broken(Driver):
+        async def status(self):
+            return SimpleNamespace(connected=False, logged_in=False, note="offline")
+    def build(store, record, **kw):
+        calls.append(record.account)
+        return Broken()
+    monkeypatch.setattr(pool, "_build_driver", build)
+    result = await pool.dispatch(store)
+    assert result.verdict == "all_accounts_failed"
+    assert calls == [record.account for record in records]
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_has_local_503_api_contract(store, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+
+    from muse_bridge import app as app_module
+    monkeypatch.setenv("MUSE_DISPATCH_MAX_ATTEMPTS", "1")
+    monkeypatch.setattr(app_module, "store", lambda: store)
+    class Broken(Driver):
+        async def status(self):
+            return SimpleNamespace(connected=False, logged_in=False, note="offline")
+    monkeypatch.setattr(pool, "_build_driver", lambda *a, **kw: Broken())
+    async def no_key():
+        return None
+    previous = app_module.app.dependency_overrides.copy()
+    app_module.app.dependency_overrides[app_module.require_key] = no_key
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app_module.app),
+                               base_url="http://local", trust_env=False) as api:
+            response = await api.post("/v1/chat/completions", json={
+                "model": "muse-1", "messages": [{"role": "user", "content": "test"}]})
+        assert response.status_code == 503
+        assert response.json()["detail"]["error"] == "dispatch_budget_exhausted"
+        assert response.json()["detail"]["type"] == "server_error"
+        assert not pool.busy_accounts()
+    finally:
+        app_module.app.dependency_overrides.clear()
+        app_module.app.dependency_overrides.update(previous)
+
+
 def test_invalid_mode_falls_back(monkeypatch):
     monkeypatch.setenv("MUSE_SCHEDULER", "typo")
     assert pool.scheduler_mode() == "legacy"
