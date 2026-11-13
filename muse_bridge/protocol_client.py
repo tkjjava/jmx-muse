@@ -736,6 +736,8 @@ class HatchProtocolClient:
         self._turn_complete = False
         # Safe terminal category only; no payload, text or account identifiers.
         self.turn_terminal_reason: str | None = None
+        # True when a turn reconnected after its prompt was sent (unverified tail).
+        self._turn_resumed = False
 
         # ---- 断线重连 / 订阅 resume（0.4.x，离线实现；真机未验收）----
         # 预算按"每个 read_stream 回合"重置（见 read_stream），连续抖动仍受上限
@@ -1820,6 +1822,10 @@ class HatchProtocolClient:
         self._idle_timeout_hit = False
         self._turn_complete = False
         self.turn_terminal_reason = None
+        # True if this turn had to reconnect after the prompt was sent. Live probes
+        # show events produced during the disconnect window are not replayed, and
+        # seq is not contiguous even without a drop, so continuity cannot be proven.
+        self._turn_resumed = False
         # Keep the replay floor fixed at the last accepted cursor even when the
         # reconnect happens during preamble rather than inside the read loop.
         resume_floor = -1
@@ -1878,6 +1884,9 @@ class HatchProtocolClient:
                 resume_floor = self._last_seen_seq
                 if not await self._resume_subscription(resume_after=resume_floor):
                     return
+                # Content produced while the socket was down cannot be recovered
+                # (probed live); mark the turn so callers don't assume continuity.
+                self._turn_resumed = True
                 skip_ack = True
                 continue
             stream_id = self._sub_stream_id

@@ -817,11 +817,12 @@ async def test_rejected_resume_fields_degrade_to_plain_subscribe():
 # ---------------------------------------------------------------- 引擎契约
 
 
-async def test_engine_collect_chat_completes_across_reconnect():
-    """引擎层契约不变：断线重连后 `collect_chat` 仍拿到完整正文并正常收尾。
+async def test_engine_completes_across_reconnect_only_with_authoritative_done():
+    """断线重连后，只有权威 `delta.message_done` 才能确认完成。
 
-    这条把客户端改动与 `protocol_engine._run` 的收尾契约（"收到正文 + 流结束
-    即完成"）钉在一起：重连是客户端内部的事，引擎不该看到漏掉或重复的正文。
+    活网探针（2026-11-14）显示断线窗口内的事件不会被补发，且 seq 本身不连续；
+    因此"重连 + 普通状态收尾"可能对应被截断的正文，引擎不得把它当成功。
+    这里同时钉住：重放里的重复正文仍被本地 floor 裁掉。
     """
     from muse_bridge.protocol_engine import ProtocolEngine
 
@@ -844,6 +845,7 @@ async def test_engine_collect_chat_completes_across_reconnect():
         first_id = client._sub_stream_id
         ws1.push(first_id, ndjson(ev(1, text="9+9"), ev(2, text="等于18。")))
         await until(lambda: client._last_seen_seq == 2, what="正文已消费")
+        assert client._turn_resumed is False
         ws1.die()
 
         await until(
@@ -851,15 +853,53 @@ async def test_engine_collect_chat_completes_across_reconnect():
             and client._sub_stream_id not in (None, first_id),
             what="重连并重订阅",
         )
+        assert client._turn_resumed is True, "回合中重连必须被标记"
         second_id = client._sub_stream_id
         ws2.push(second_id, ndjson(
             ev(2, text="等于18。"),  # 包含游标的重复事件：必须被裁掉
-            ev(3, activity="online"),
+            ev(3, name="delta.message_done", status="completed",
+               transcript={"messages": [{"content": [{"type": "text", "text": "9+9等于18。"}]}]}),
         ))
         text, media = await asyncio.wait_for(reader, 2.0)
         assert text == "9+9等于18。", "重连不得让引擎看到重复或缺失的正文"
         assert media == []
         assert client._last_seen_seq == 3
+
+
+async def test_engine_generic_terminal_after_reconnect_is_not_success():
+    """普通 agent.status 收尾不能证明断线期间正文未丢：必须报不完整。"""
+    from muse_bridge.protocol_engine import ProtocolEngine, ProtocolGenerationError
+
+    script = ScriptedHTTP(
+        {
+            ("GET", "/api/session"): [http_json(session_json())],
+            ("POST", "/api/hatch/token"): [http_json(TOKEN_BODY)],
+        }
+    )
+    ws1 = NoiseWebSocket(Responder(chat_table()))
+    ws2 = NoiseWebSocket(Responder(chat_table()))
+    opener = SequenceOpener([ws1, ws2])
+
+    async with hatched(script, opener=opener, reconnect_backoff=0.0) as client:
+        await client.connect()
+        engine = ProtocolEngine(client)
+        reader = asyncio.create_task(engine.collect_chat("9+9", timeout=3.0))
+
+        await until(lambda: client._sub_stream_id is not None, what="订阅建立")
+        first_id = client._sub_stream_id
+        ws1.push(first_id, ndjson(ev(1, text="9+9"), ev(2, text="等于18。")))
+        await until(lambda: client._last_seen_seq == 2, what="正文已消费")
+        ws1.die()
+        await until(
+            lambda: len(opener.calls) == 2
+            and client._sub_stream_id not in (None, first_id),
+            what="重连并重订阅",
+        )
+        second_id = client._sub_stream_id
+        # 服务端只给了尾部状态、没有权威完成事件：正文可能已在断线期间丢失。
+        ws2.push(second_id, ndjson(ev(2, text="等于18。"), ev(3, activity="online")))
+        with pytest.raises(ProtocolGenerationError, match="连续性无法确认"):
+            await asyncio.wait_for(reader, 2.0)
 
 
 @pytest.mark.parametrize("reject_resume", [False, True])

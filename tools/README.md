@@ -27,6 +27,7 @@ kwargs，才证明代理真的用上了。
 | `refresh_account.py` | 刷账号探针，让 `accounts_dispatchable` 回到 1 | 否 |
 | `protocol_flow.py` | 协议一条龙：抓已登录 Chrome 的 cookie → 导入桥 → 纯 HTTP 续期 → 验证 `chat_driver=protocol`；`--verify-chat` 额外跑一次最小聊天 | `--verify-chat` 会（极小） |
 | `protocol_cancel_timing.py` | 取消时序探针：发一条短文本 → 收到正文后显式 `chat.cancel` → 记录 ACK 延迟、ACK 后正文增量数与终态；只读账号库、输出脱敏 JSON | 会（一次短聊天） |
+| `protocol_resume_probe.py` | 断线续传探针：回答中途掐断 WS → 重连 → 记录游标、断线前后 seq、正文段数与是否权威完成；只读账号库、输出脱敏 JSON | 会（一次约 400 字回答） |
 | `acceptance.py` | 成品链路、流式 SSE、清扫计数、（可选）协议生成 | `generation` 会 |
 | `accept_video.py` | 视频端到端：任务轮询、`ftyp` 魔数、Range 分段、时长 | 会 |
 | `accept_relay_media.py` | 经 relay 验媒体字段透传 + **按客户端方式取件** | 会 |

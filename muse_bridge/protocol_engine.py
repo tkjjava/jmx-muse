@@ -1184,7 +1184,18 @@ class ProtocolEngine:
             # A finite stream can end through disconnect/idle timeout just as it
             # can through agent.status. Only the client's recognized terminal
             # signal confirms the latter; partial text is never proof of success.
+            terminal = getattr(self.client, "turn_terminal_reason", None)
+            resumed = getattr(self.client, "_turn_resumed", False) is True
             if getattr(self.client, "_turn_complete", False) is True and elapsed < timeout:
+                if resumed and terminal != "delta.message_done":
+                    # Live probes show events emitted while the socket was down are
+                    # not replayed, and seq is not contiguous even without a drop.
+                    # A generic status terminal can therefore close a truncated
+                    # answer; only an authoritative message_done is trusted.
+                    raise ProtocolGenerationError(
+                        "断线重连后未收到权威完成事件，正文连续性无法确认"
+                        f"（已收 {len(text_parts)} 段，用时 {elapsed:.1f}s/{timeout}s）"
+                    )
                 done = True
             else:
                 raise ProtocolGenerationError(
