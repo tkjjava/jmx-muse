@@ -18,6 +18,9 @@
 - 恢复可观测：新增 `chat_history_recovered` / `chat_history_recovery_missed` /
   `chat_history_recovery_failed` / `chat_done_tail_emitted` 计数（`/admin/observability`），
   文档见 USAGE §10.5；1 条引擎回归。
+- bridge 级隔离实测（`tools/bridge_disconnect_probe.py`）：复制库起独立 bridge +
+  自建 CONNECT 中继，回答中途掐断上游连接后，SSE 仍 `finish_reason=stop`、正文
+  456 字与已提交历史一致、恢复计数与尾部补发计数各 +1。不碰生产实例。
 - 证据见 docs/2026-11-14_history-recovery-probe.md。
 
 ---

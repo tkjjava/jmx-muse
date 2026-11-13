@@ -104,6 +104,30 @@ event: {seq:int, event_name:"message.assistant"|"message.user",
 `chat_history_recovery_missed` / `chat_history_recovery_failed`，驱动补发尾部时
 计数 `chat_done_tail_emitted`，都可在 `/admin/observability` 读取（USAGE §10.5）。
 
+### Bridge 级验证（隔离实例，不碰生产）
+
+引擎与驱动层的测试都绕过了 bridge 的 HTTP 面。为证明**用户实际看到的那条链**
+（`/v1/chat/completions` SSE → pool → driver → engine）在断线后仍完整，用
+`tools/bridge_disconnect_probe.py` 做了一次隔离实测：
+
+1. 复制账号库到临时目录，独立端口起 bridge（`MUSE_PROTOCOL_DRIVER=1`，代理指向
+   工具自建的 CONNECT 中继）；复制库的探针时间戳已过期，先经 admin keepalive 刷新；
+2. SSE 发起约 400 字回答，收到第一个正文块后掐断中继内所有隧道（监听保持，故可重连）；
+3. 结果：
+
+```json
+{"ok": true, "length_verified": true, "driver": "protocol",
+ "content_chunks": 14, "content_len": 456, "committed_len": 456,
+ "finish_reason": "stop", "relay_killed_at_s": 23.3,
+ "counters": {"protocol_driver_built": 1, "chat_history_recovered": 1,
+              "chat_done_tail_emitted": 1},
+ "elapsed_s": 32.56}
+```
+
+即：上游连接在回答中途被强制掐断，bridge 对外的 SSE 仍以 `finish_reason=stop`
+结束，客户端收到完整 456 字，与已提交历史的长度一致；恢复计数与尾部补发计数
+各 +1。这条证据把引擎、驱动、HTTP 三层串起来了。
+
 ## 恢复接线
 
 `ProtocolEngine(history_recovery=True)`（默认）：
